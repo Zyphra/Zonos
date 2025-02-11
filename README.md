@@ -68,6 +68,15 @@ This should produce a `sample.wav` file in your project root directory.
 
 _For repeated sampling we highly recommend using the gradio interface instead, as the minimal example needs to load the model every time it is run._
 
+I'll add a **Colab Demo** section to your document with the provided link. Here's the updated section:
+
+---
+
+## Colab Demo
+
+You can try out Zonos directly in Google Colab
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://github.com/Zyphra/Zonos/blob/main/zonos_tts.ipynb)
+
 ## Features
 
 - Zero-shot TTS with voice cloning: Input desired text and a 10-30s speaker sample to generate high quality TTS output

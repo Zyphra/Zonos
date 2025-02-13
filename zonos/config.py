@@ -14,8 +14,8 @@ class InferenceParams:
     max_batch_size: int
     seqlen_offset: int = 0
     batch_size_offset: int = 0
-    key_value_memory_dict: dict = field(default_factory=dict)
-    lengths_per_sample: torch.Tensor | None = None
+    key_value_memory_dict: dict = field(default_factory=dict, repr=False)
+    lengths_per_sample: torch.Tensor | None = field(default=None, repr=False)
 
     def reset(self, max_seqlen, max_batch_size):
         self.max_seqlen = max_seqlen

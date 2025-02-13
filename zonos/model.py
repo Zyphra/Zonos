@@ -60,7 +60,7 @@ class Zonos(nn.Module):
     ) -> "Zonos":
         config_path = hf_hub_download(repo_id=repo_id, filename="config.json", revision=revision)
         model_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors", revision=revision)
-        return cls.from_local(config_path, model_path, device)
+        return cls.from_local(config_path, model_path, device, **kwargs)
 
     @classmethod
     def from_local(
@@ -114,6 +114,7 @@ class Zonos(nn.Module):
         cfg_scale: float,
         allow_cudagraphs: bool = True,
     ) -> torch.Tensor:
+        #breakpoint()
         """
         Single-step decode. Prepares the hidden states, possibly replicates them
         for CFG, and then delegates to `_compute_logits`.
@@ -225,7 +226,7 @@ class Zonos(nn.Module):
         # Use CUDA Graphs if supported, and torch.compile otherwise.
         cg = self.can_use_cudagraphs()
         decode_one_token = self._decode_one_token
-        decode_one_token = torch.compile(decode_one_token, dynamic=True, disable=cg)
+        #decode_one_token = torch.compile(decode_one_token, dynamic=True, disable=cg)
 
         unknown_token = -1
         audio_seq_len = prefix_audio_len + max_new_tokens
@@ -260,13 +261,13 @@ class Zonos(nn.Module):
         max_steps = delayed_codes.shape[2] - offset
         remaining_steps = torch.full((batch_size,), max_steps, device=device)
         progress = tqdm(total=max_steps, desc="Generating", disable=not progress_bar)
-        cfg_scale = torch.tensor(cfg_scale)
+        #cfg_scale = torch.tensor(cfg_scale)
 
         step = 0
         while torch.max(remaining_steps) > 0:
             offset += 1
             input_ids = delayed_codes[..., offset - 1 : offset]
-            logits = decode_one_token(input_ids, inference_params, cfg_scale, allow_cudagraphs=cg)
+            logits = decode_one_token(input_ids.clone(), inference_params, cfg_scale, allow_cudagraphs=cg)
 
             next_token = sample_from_logits(logits, generated_tokens=delayed_codes[..., :offset], **sampling_params)
             eos_in_cb0 = next_token[:, 0] == self.eos_token_id
@@ -302,3 +303,22 @@ class Zonos(nn.Module):
         self._cg_graph = None  # reset cuda graph to avoid cache changes
 
         return out_codes
+
+
+class ZonosDecodeOne(torch.nn.Module):
+    def __init__(self, model, inference_params):
+        super().__init__()
+        self.model = model
+        self.inference_params = inference_params
+
+    def forward(self, input_ids, key_value_memory_dict, lengths_per_sample):
+        cfg_scale = 2.0
+        inference_params = InferenceParams(
+            max_seqlen=self.inference_params.max_seqlen,
+            max_batch_size=self.inference_params.max_batch_size,
+            seqlen_offset=self.inference_params.seqlen_offset,
+            batch_size_offset=self.inference_params.batch_size_offset,
+            key_value_memory_dict=key_value_memory_dict,
+            lengths_per_sample=lengths_per_sample,
+        )
+        return self.model._decode_one_token(input_ids, inference_params, cfg_scale, allow_cudagraphs=False)

@@ -17,7 +17,6 @@ conditioning = model.prepare_conditioning(cond_dict)
 
 codes_warmup = model.generate(conditioning)
 
-codes = model.generate(conditioning)
-
+codes = model.generate(prefix_conditioning)
 wavs = model.autoencoder.decode(codes).cpu()
 torchaudio.save("sample.wav", wavs[0], model.autoencoder.sampling_rate)

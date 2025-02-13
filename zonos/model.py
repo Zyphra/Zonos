@@ -236,7 +236,8 @@ class Zonos(nn.Module):
             inference_params = self.setup_cache(batch_size=batch_size * 2, max_seqlen=seq_len)
             codes = torch.full((batch_size, 9, audio_seq_len), unknown_token)
 
-        #decode_one_token = ZonosDecodeOne(self, inference_params)
+        decode_one_token = ZonosDecodeOne(self, inference_params)
+
         print("loading")
         decode_one_token = torch._inductor.aoti_load_package("Zonos-v0.1-transformer-go.pt2")
         print("done loading")
@@ -272,7 +273,16 @@ class Zonos(nn.Module):
         while torch.max(remaining_steps) > 0:
             offset += 1
             input_ids = delayed_codes[..., offset - 1 : offset]
-            logits = decode_one_token(input_ids.clone(), inference_params.key_value_memory_dict, inference_params.lengths_per_sample)
+
+            if step == 0 and False:
+                from torch.export import Dim
+                s0 = Dim("s0", min=9)
+                s1 = Dim("s1", max=2614)  # TODO: off by one, 2615 better
+                ep = torch.export.export(decode_one_token, (input_ids.clone(), {k: (v[0].detach(), v[1]) for k, v in inference_params.key_value_memory_dict.items()}, inference_params.lengths_per_sample, torch.empty(inference_params.seqlen_offset, 0)), dynamic_shapes = {"input_ids": {1: s0}, "key_value_memory_dict": {k: (None, None) for k in inference_params.key_value_memory_dict}, "lengths_per_sample": None, "seqlen_offset_box": {0: s1}})
+                torch._inductor.aoti_compile_and_package(ep, package_path="Zonos-v0.1-transformer-go.pt2")
+
+            #logits = ep.module()(input_ids.clone(), inference_params.key_value_memory_dict, inference_params.lengths_per_sample, torch.tensor(inference_params.seqlen_offset))
+            logits = decode_one_token(input_ids.clone(), inference_params.key_value_memory_dict, inference_params.lengths_per_sample, torch.empty(inference_params.seqlen_offset, 0))
 
             next_token = sample_from_logits(logits, generated_tokens=delayed_codes[..., :offset], **sampling_params)
             eos_in_cb0 = next_token[:, 0] == self.eos_token_id
@@ -309,19 +319,25 @@ class Zonos(nn.Module):
 
         return out_codes
 
+import dataclasses
+
 
 class ZonosDecodeOne(torch.nn.Module):
     def __init__(self, model, inference_params):
         super().__init__()
         self.model = model
-        self.inference_params = inference_params
+        # NB: induce a copy, so mutations don't reflect
+        self.inference_params = dataclasses.replace(inference_params, key_value_memory_dict=None, lengths_per_sample=None, seqlen_offset=None)
 
-    def forward(self, input_ids, key_value_memory_dict, lengths_per_sample):
+    def forward(self, input_ids, key_value_memory_dict, lengths_per_sample, seqlen_offset_box):
         cfg_scale = 2.0
+        # TODO: I shouldn't have done it this way, I could have just had it as
+        # a separate dynamic variable lol
+        seqlen_offset = seqlen_offset_box.shape[0]
         inference_params = InferenceParams(
             max_seqlen=self.inference_params.max_seqlen,
             max_batch_size=self.inference_params.max_batch_size,
-            seqlen_offset=self.inference_params.seqlen_offset,
+            seqlen_offset=seqlen_offset,
             batch_size_offset=self.inference_params.batch_size_offset,
             key_value_memory_dict=key_value_memory_dict,
             lengths_per_sample=lengths_per_sample,

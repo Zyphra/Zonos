@@ -1,0 +1,30 @@
+%load_ext autoreload
+%autoreload 2
+from zonos.model import Zonos
+import torch
+from zonos.conditioning import make_cond_dict
+from zonos.model import ZonosDecodeOne
+
+model = Zonos.from_pretrained("Zyphra/Zonos-v0.1-transformer", device="cuda", backbone="torch")
+input_ids = torch.zeros((1, 20, 1), dtype=torch.int64, device="cuda")
+cond_dict = make_cond_dict(text="Hello, world! I am the one you need. Let me take you to a far off place.", language="en-us")
+prefix_conditioning = model.prepare_conditioning(cond_dict)
+batch_size = 1
+audio_prefix_codes = None  # No prefix for now
+prefix_audio_len = 0 if audio_prefix_codes is None else audio_prefix_codes.shape[2]
+max_new_tokens: int = 86 * 30
+audio_seq_len = prefix_audio_len + max_new_tokens
+seq_len = prefix_conditioning.shape[1] + audio_seq_len + 9
+device = 'cuda'
+with torch.device(device):
+    inference_params = model.setup_cache(batch_size=batch_size * 2, max_seqlen=seq_len)
+
+"""
+s0 = Dim("s0", min=9)
+exportable_model = ZonosDecodeOne(model, inference_params)
+exportable_model(input_ids, inference_params.key_value_memory_dict, inference_params.lengths_per_sample
+)
+with torch.inference_mode():
+    ep = torch.export.export(exportable_model, (input_ids, {k: (v[0].detach(), v[1]) for k, v in inference_params.key_value_memory_dict.items()}, inference_params.lengths_per_sample), dynamic_shapes = {"input_ids": {1: s0}, "key_value_memory_dict": {k: (None, None) for k in inference_params.key_value_memory_dict}, "lengths_per_sample": None})
+torch._inductor.aoti_compile_and_package(ep, package_path="Zonos-v0.1-transformer-go.pt2")
+"""

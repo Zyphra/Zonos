@@ -224,9 +224,8 @@ class Zonos(nn.Module):
         device = self.device
 
         # Use CUDA Graphs if supported, and torch.compile otherwise.
-        cg = self.can_use_cudagraphs()
+        cg = False
         #decode_one_token = self._decode_one_token
-        #decode_one_token = torch.compile(decode_one_token, dynamic=True, disable=cg)
 
         unknown_token = -1
         audio_seq_len = prefix_audio_len + max_new_tokens
@@ -237,6 +236,8 @@ class Zonos(nn.Module):
             codes = torch.full((batch_size, 9, audio_seq_len), unknown_token)
 
         decode_one_token = ZonosDecodeOne(self, inference_params)
+
+        #decode_one_token = torch.compile(decode_one_token, dynamic=True, disable=cg)
 
         print("loading")
         decode_one_token = torch._inductor.aoti_load_package("Zonos-v0.1-transformer-go.pt2")
@@ -276,9 +277,12 @@ class Zonos(nn.Module):
 
             if step == 0 and False:
                 from torch.export import Dim
+                # WTF are these numbers LOL
                 s0 = Dim("s0", min=9)
                 s1 = Dim("s1", max=2614)  # TODO: off by one, 2615 better
-                ep = torch.export.export(decode_one_token, (input_ids.clone(), {k: (v[0].detach(), v[1]) for k, v in inference_params.key_value_memory_dict.items()}, inference_params.lengths_per_sample, torch.empty(inference_params.seqlen_offset, 0)), dynamic_shapes = {"input_ids": {1: s0}, "key_value_memory_dict": {k: (None, None) for k in inference_params.key_value_memory_dict}, "lengths_per_sample": None, "seqlen_offset_box": {0: s1}})
+                s8 = Dim("s8", min=3, max=1048575)
+                # guessing s9 is not dynamic
+                ep = torch.export.export(decode_one_token, (input_ids.clone(), {k: (v[0].detach(), v[1]) for k, v in inference_params.key_value_memory_dict.items()}, inference_params.lengths_per_sample, torch.empty(inference_params.seqlen_offset, 0)), dynamic_shapes = {"input_ids": {1: s0}, "key_value_memory_dict": {k: ({1: s8}, None) for k in inference_params.key_value_memory_dict}, "lengths_per_sample": None, "seqlen_offset_box": {0: s1}})
                 torch._inductor.aoti_compile_and_package(ep, package_path="Zonos-v0.1-transformer-go.pt2")
 
             #logits = ep.module()(input_ids.clone(), inference_params.key_value_memory_dict, inference_params.lengths_per_sample, torch.tensor(inference_params.seqlen_offset))

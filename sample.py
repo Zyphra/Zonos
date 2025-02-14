@@ -12,11 +12,13 @@ speaker = model.make_speaker_embedding(wav, sampling_rate)
 
 torch.manual_seed(421)
 
-cond_dict = make_cond_dict(text="Hello, world! I am the one you need. Let me take you to a far off place.", speaker=speaker, language="en-us")
-conditioning = model.prepare_conditioning(cond_dict)
+def gen(text, out):
+    cond_dict = make_cond_dict(text=text, speaker=speaker, language="en-us")
+    conditioning = model.prepare_conditioning(cond_dict)
+    codes = model.generate(conditioning)
+    wavs = model.autoencoder.decode(codes).cpu()
+    torchaudio.save(out, wavs[0], model.autoencoder.sampling_rate)
 
-codes_warmup = model.generate(conditioning)
-
-codes = model.generate(prefix_conditioning)
-wavs = model.autoencoder.decode(codes).cpu()
-torchaudio.save("sample.wav", wavs[0], model.autoencoder.sampling_rate)
+gen("A long text that is from a far off place called Montana.", "sample1.wav")
+gen("A short text.", "sample2.wav")
+gen("An in between, not too long.", "sample3.wav")

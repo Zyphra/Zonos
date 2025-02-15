@@ -106,7 +106,7 @@ def sample_from_logits(
     min_p: float = 0.0,
     generated_tokens: torch.Tensor | None = None,
     repetition_penalty: float = 3.0,
-    repetition_penalty_window: float = 2,
+    repetition_penalty_window: int = 2,
 ) -> torch.Tensor:
     """Sample next token from logits using temperature, top-p, top-k, or min-p sampling.
 

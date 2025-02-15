@@ -5,20 +5,22 @@ import safetensors
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
-from mamba_ssm.utils.generation import InferenceParams
 from tqdm import tqdm
 
 from zonos.autoencoder import DACAutoencoder
-from zonos.backbone import ZonosBackbone
+from zonos.backbone import BACKBONES
 from zonos.codebook_pattern import apply_delay_pattern, revert_delay_pattern
 from zonos.conditioning import PrefixConditioner
-from zonos.config import ZonosConfig
+from zonos.config import InferenceParams, ZonosConfig
 from zonos.sampling import sample_from_logits
 from zonos.speaker_cloning import SpeakerEmbeddingLDA
+from zonos.utils import DEFAULT_DEVICE, find_multiple, pad_weight_
+
+DEFAULT_BACKBONE_CLS = next(iter(BACKBONES.values()))
 
 
 class Zonos(nn.Module):
-    def __init__(self, config: ZonosConfig):
+    def __init__(self, config: ZonosConfig, backbone_cls=DEFAULT_BACKBONE_CLS):
         super().__init__()
         self.config = config
         dim = config.backbone.d_model
@@ -26,7 +28,7 @@ class Zonos(nn.Module):
         self.masked_token_id = config.masked_token_id
 
         self.autoencoder = DACAutoencoder()
-        self.backbone = ZonosBackbone(config.backbone)
+        self.backbone = backbone_cls(config.backbone)
         self.prefix_conditioner = PrefixConditioner(config.prefix_conditioner, dim)
         self.spk_clone_model = None
 
@@ -41,16 +43,40 @@ class Zonos(nn.Module):
         self._cg_inference_params = None
         self._cg_scale = None
 
-    @classmethod
-    def from_pretrained(cls, repo_id: str, revision: str | None = None, device: str = "cuda") -> "Zonos":
-        config_path = hf_hub_download(repo_id=repo_id, filename="config.json", revision=revision)
-        model_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors", revision=revision)
-        return cls.from_local(config_path, model_path, device)
+        if config.pad_vocab_to_multiple_of:
+            self.register_load_state_dict_post_hook(self._pad_embeddings_and_heads)
+
+    def _pad_embeddings_and_heads(self, *args, **kwargs):
+        for w in [*self.embeddings, *self.heads]:
+            pad_weight_(w, self.config.pad_vocab_to_multiple_of)
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.parameters()).device
 
     @classmethod
-    def from_local(cls, config_path: str, model_path: str, device: str = "cuda") -> "Zonos":
+    def from_pretrained(
+        cls, repo_id: str, revision: str | None = None, device: str = DEFAULT_DEVICE, **kwargs
+    ) -> "Zonos":
+        config_path = hf_hub_download(repo_id=repo_id, filename="config.json", revision=revision)
+        model_path = hf_hub_download(repo_id=repo_id, filename="model.safetensors", revision=revision)
+        return cls.from_local(config_path, model_path, device, **kwargs)
+
+    @classmethod
+    def from_local(
+        cls, config_path: str, model_path: str, device: str = DEFAULT_DEVICE, backbone: str | None = None
+    ) -> "Zonos":
         config = ZonosConfig.from_dict(json.load(open(config_path)))
-        model = cls(config).to(device, torch.bfloat16)
+        if backbone:
+            backbone_cls = BACKBONES[backbone]
+        else:
+            is_transformer = not bool(config.backbone.ssm_cfg)
+            backbone_cls = DEFAULT_BACKBONE_CLS
+            # Preferentially route to pure torch backbone for increased performance and lower latency.
+            if is_transformer and "torch" in BACKBONES:
+                backbone_cls = BACKBONES["torch"]
+
+        model = cls(config, backbone_cls).to(device, torch.bfloat16)
         model.autoencoder.dac.to(device)
 
         sd = model.state_dict()
@@ -86,6 +112,7 @@ class Zonos(nn.Module):
         if cfg_scale != 1.0:
             cond_logits, uncond_logits = logits.chunk(2)
             logits = uncond_logits + (cond_logits - uncond_logits) * cfg_scale
+        logits[..., 1025:].fill_(-torch.inf)  # ensures padding is ignored
         return logits
 
     def _decode_one_token(
@@ -93,6 +120,7 @@ class Zonos(nn.Module):
         input_ids: torch.Tensor,
         inference_params: InferenceParams,
         cfg_scale: float,
+        allow_cudagraphs: bool = True,
     ) -> torch.Tensor:
         """
         Single-step decode. Prepares the hidden states, possibly replicates them
@@ -108,6 +136,11 @@ class Zonos(nn.Module):
             return self._compute_logits(hidden_states, inference_params, cfg_scale)
 
         bsz = input_ids.size(0)
+
+        if not allow_cudagraphs or input_ids.device.type != "cuda":
+            hidden_states_local = self.embed_codes(input_ids)
+            hidden_states_local = hidden_states_local.repeat(2, 1, 1)
+            return self._compute_logits(hidden_states_local, inference_params, cfg_scale)
 
         need_capture = (self._cg_graph is None) or (self._cg_batch_size != bsz)
 
@@ -163,11 +196,9 @@ class Zonos(nn.Module):
         return self._compute_logits(hidden_states, inference_params, cfg_scale)
 
     def setup_cache(self, batch_size: int, max_seqlen: int, dtype: torch.dtype = torch.bfloat16) -> InferenceParams:
-        key_value_memory_dict = {
-            i: layer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype)
-            for i, layer in enumerate(self.backbone.layers)
-        }
-        lengths_per_sample = torch.full((batch_size,), 0, dtype=torch.int32, device="cuda")
+        max_seqlen = find_multiple(max_seqlen, 8)
+        key_value_memory_dict = self.backbone.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype)
+        lengths_per_sample = torch.full((batch_size,), 0, dtype=torch.int32)
         return InferenceParams(max_seqlen, batch_size, 0, 0, key_value_memory_dict, lengths_per_sample)
 
     def prepare_conditioning(self, cond_dict: dict, uncond_dict: dict | None = None) -> torch.Tensor:
@@ -180,6 +211,10 @@ class Zonos(nn.Module):
             ]
         )
 
+    def can_use_cudagraphs(self) -> bool:
+        # Only the mamba-ssm backbone supports CUDA Graphs at the moment
+        return self.device.type == "cuda" and "_mamba_ssm" in str(self.backbone.__class__)
+
     @torch.inference_mode()
     def generate(
         self,
@@ -190,18 +225,26 @@ class Zonos(nn.Module):
         batch_size: int = 1,
         sampling_params: dict = dict(min_p=0.1),
         progress_bar: bool = True,
+        disable_torch_compile: bool = False,
         callback: Callable[[torch.Tensor, int, int], bool] | None = None,
     ):
         assert cfg_scale != 1, "TODO: add support for cfg_scale=1"
         prefix_audio_len = 0 if audio_prefix_codes is None else audio_prefix_codes.shape[2]
+        device = self.device
+
+        # Use CUDA Graphs if supported, and torch.compile otherwise.
+        cg = self.can_use_cudagraphs()
+        decode_one_token = self._decode_one_token
+        decode_one_token = torch.compile(decode_one_token, dynamic=True, disable=cg or disable_torch_compile)
 
         unknown_token = -1
         audio_seq_len = prefix_audio_len + max_new_tokens
-        seq_len = prefix_conditioning.shape[1] + audio_seq_len
+        seq_len = prefix_conditioning.shape[1] + audio_seq_len + 9
 
-        inference_params = self.setup_cache(batch_size=batch_size * 2, max_seqlen=seq_len)
+        with torch.device(device):
+            inference_params = self.setup_cache(batch_size=batch_size * 2, max_seqlen=seq_len)
+            codes = torch.full((batch_size, 9, audio_seq_len), unknown_token)
 
-        codes = torch.full((batch_size, 9, audio_seq_len), unknown_token, device="cuda")
         if audio_prefix_codes is not None:
             codes[..., :prefix_audio_len] = audio_prefix_codes
 
@@ -223,16 +266,18 @@ class Zonos(nn.Module):
         logit_bias = torch.zeros_like(logits)
         logit_bias[:, 1:, self.eos_token_id] = -torch.inf  # only allow codebook 0 to predict EOS
 
-        stopping = torch.zeros(batch_size, dtype=torch.bool, device="cuda")
+        stopping = torch.zeros(batch_size, dtype=torch.bool, device=device)
         max_steps = delayed_codes.shape[2] - offset
-        remaining_steps = torch.full((batch_size,), max_steps, device="cuda")
+        remaining_steps = torch.full((batch_size,), max_steps, device=device)
         progress = tqdm(total=max_steps, desc="Generating", disable=not progress_bar)
+        cfg_scale = torch.tensor(cfg_scale)
 
         step = 0
         while torch.max(remaining_steps) > 0:
             offset += 1
             input_ids = delayed_codes[..., offset - 1 : offset]
-            logits = self._decode_one_token(input_ids, inference_params, cfg_scale)
+            logits = decode_one_token(input_ids, inference_params, cfg_scale, allow_cudagraphs=cg)
+            logits += logit_bias
 
             next_token = sample_from_logits(logits, generated_tokens=delayed_codes[..., :offset], **sampling_params)
             eos_in_cb0 = next_token[:, 0] == self.eos_token_id

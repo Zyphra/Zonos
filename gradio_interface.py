@@ -1,6 +1,7 @@
 import torch
 import torchaudio
 import gradio as gr
+from datetime import datetime
 from os import getenv
 
 from zonos.model import Zonos
@@ -12,7 +13,6 @@ CURRENT_MODEL = None
 
 SPEAKER_EMBEDDING = None
 SPEAKER_AUDIO_PATH = None
-
 
 def load_model_if_needed(model_choice: str):
     global CURRENT_MODEL_TYPE, CURRENT_MODEL
@@ -26,7 +26,6 @@ def load_model_if_needed(model_choice: str):
         CURRENT_MODEL_TYPE = model_choice
         print(f"{model_choice} model loaded successfully!")
     return CURRENT_MODEL
-
 
 def update_ui(model_choice):
     """
@@ -81,7 +80,6 @@ def update_ui(model_choice):
         unconditional_keys_update,
     )
 
-
 def generate_audio(
     model_choice,
     text,
@@ -107,6 +105,7 @@ def generate_audio(
     seed,
     randomize_seed,
     unconditional_keys,
+    file_prefix,  #the parameter for custo mfilename prefix
     progress=gr.Progress(),
 ):
     """
@@ -125,7 +124,6 @@ def generate_audio(
     seed = int(seed)
     max_new_tokens = 86 * 30
 
-    # This is a bit ew, but works for now.
     global SPEAKER_AUDIO_PATH, SPEAKER_EMBEDDING
 
     if randomize_seed:
@@ -191,8 +189,22 @@ def generate_audio(
     sr_out = selected_model.autoencoder.sampling_rate
     if wav_out.dim() == 2 and wav_out.size(0) > 1:
         wav_out = wav_out[0:1, :]
-    return (sr_out, wav_out.squeeze().numpy()), seed
 
+    # make sure the audio tensor is in the correct format (channels, samples)
+    wav_tensor = wav_out.squeeze(0)
+    if wav_tensor.ndim == 1:
+        wav_tensor = wav_tensor.unsqueeze(0)
+
+    # filename using the specified prefix and the current date and time
+    now_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"{file_prefix}-{now_str}.wav"
+
+    # Save the audio to disk
+    torchaudio.save(filename, wav_tensor, sr_out)
+    print(f"Audio saved as {filename}")
+
+    # Return the file path for download along with the seed
+    return filename, seed
 
 def build_interface():
     with gr.Blocks() as demo:
@@ -236,7 +248,6 @@ def build_interface():
                 vq_single_slider = gr.Slider(0.5, 0.8, 0.78, 0.01, label="VQ Score")
                 pitch_std_slider = gr.Slider(0.0, 300.0, value=45.0, step=1, label="Pitch Std")
                 speaking_rate_slider = gr.Slider(5.0, 30.0, value=15.0, step=0.5, label="Speaking Rate")
-
             with gr.Column():
                 gr.Markdown("## Generation Parameters")
                 cfg_scale_slider = gr.Slider(1.0, 5.0, 2.0, 0.1, label="CFG Scale")
@@ -265,7 +276,6 @@ def build_interface():
                     value=["emotion"],
                     label="Unconditional Keys",
                 )
-
             gr.Markdown(
                 "### Emotion Sliders\n"
                 "Warning: The way these sliders work is not intuitive and may require some trial and error to get the desired effect.\n"
@@ -283,8 +293,11 @@ def build_interface():
                 emotion8 = gr.Slider(0.0, 1.0, 0.2, 0.05, label="Neutral")
 
         with gr.Column():
+            # Add a textbox for the custom filename prefix with default as "audio"
+            file_prefix = gr.Textbox(label="Filename Prefix", value="audio", interactive=True)
             generate_button = gr.Button("Generate Audio")
-            output_audio = gr.Audio(label="Generated Audio", type="numpy", autoplay=True)
+            # Set output type to "filepath"
+            output_audio = gr.Audio(label="Generated Audio", type="filepath", autoplay=True)
 
         model_choice.change(
             fn=update_ui,
@@ -312,7 +325,7 @@ def build_interface():
             ],
         )
 
-        # On page load, trigger the same UI refresh
+# On page load, trigger the same UI refresh
         demo.load(
             fn=update_ui,
             inputs=[model_choice],
@@ -338,8 +351,7 @@ def build_interface():
                 unconditional_keys,
             ],
         )
-
-        # Generate audio on button click
+# Generate audio on button click
         generate_button.click(
             fn=generate_audio,
             inputs=[
@@ -367,6 +379,7 @@ def build_interface():
                 seed_number,
                 randomize_seed_toggle,
                 unconditional_keys,
+                file_prefix,  # new textbox input for filename prefix
             ],
             outputs=[output_audio, seed_number],
         )

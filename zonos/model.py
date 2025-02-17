@@ -54,6 +54,163 @@ class Zonos(nn.Module):
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
+    def generate_chunked(
+        self,
+        prefix_conditioning: torch.Tensor,
+        max_new_tokens: int = 86 * 30,
+        chunk_size: int = 86 * 10,  # 10 seconds default
+        overlap_size: int = 86 * 1.5,  # 1.5 second overlap
+        audio_prefix_codes: torch.Tensor | None = None,
+        cfg_scale: float = 2.0,
+        batch_size: int = 1,
+        sampling_params: dict = dict(min_p=0.1),
+        progress_bar: bool = True,
+    ):
+        """
+        Generate audio in chunks with overlapping boundaries.
+        
+        Args:
+            chunk_size: Number of tokens per chunk
+            overlap_size: Size of overlap region between chunks
+            (other args same as generate())
+        """
+        assert cfg_scale != 1, "TODO: add support for cfg_scale=1"
+        device = prefix_conditioning.device
+        
+        # Initialize generation state
+        prefix_audio_len = 0 if audio_prefix_codes is None else audio_prefix_codes.shape[2]
+        unknown_token = -1
+        
+        # Track chunks and their overlaps
+        chunks = []
+        last_chunk_end = None
+        
+        # Calculate number of chunks needed
+        effective_chunk_size = chunk_size - overlap_size
+        num_chunks = math.ceil(max_new_tokens / effective_chunk_size)
+        
+        # Progress tracking
+        total_progress = tqdm(total=max_new_tokens, desc="Generating", disable=not progress_bar)
+        tokens_generated = 0
+        
+        for chunk_idx in range(num_chunks):
+            # Calculate chunk boundaries
+            chunk_start = chunk_idx * effective_chunk_size
+            chunk_tokens = min(chunk_size, max_new_tokens - chunk_start + overlap_size)
+            
+            # Setup inference params for this chunk
+            inference_params = self.setup_cache(
+                batch_size=batch_size * 2,
+                max_seqlen=prefix_conditioning.shape[1] + chunk_tokens
+            )
+            
+            # Initialize chunk codes
+            chunk_codes = torch.full(
+                (batch_size, 9, chunk_tokens),
+                unknown_token,
+                device=device
+            )
+            
+            # Apply delay pattern with previous chunk ending if available
+            delayed_codes = apply_delay_pattern(
+                chunk_codes,
+                self.masked_token_id,
+                prev_chunk_end=last_chunk_end
+            )
+            
+            # Generate the chunk
+            chunk_out = self._generate_chunk(
+                prefix_conditioning=prefix_conditioning,
+                delayed_codes=delayed_codes,
+                inference_params=inference_params,
+                cfg_scale=cfg_scale,
+                sampling_params=sampling_params,
+                progress_bar=False  # Use outer progress bar
+            )
+            
+            # Save last n_codebooks tokens for next chunk
+            last_chunk_end = chunk_out[..., -9:]
+            
+            # If not first chunk, interpolate with previous
+            if chunks:
+                overlap = interpolate_latents(
+                    chunks[-1],
+                    chunk_out,
+                    overlap_size
+                )
+                chunks[-1][..., -overlap_size:] = overlap
+                
+                # Remove overlap from current chunk
+                chunk_out = chunk_out[..., overlap_size:]
+            
+            chunks.append(chunk_out)
+            
+            # Update progress
+            new_tokens = chunk_out.shape[-1]
+            tokens_generated += new_tokens
+            total_progress.update(new_tokens)
+            
+            if tokens_generated >= max_new_tokens:
+                break
+                
+        total_progress.close()
+        
+        # Concatenate all chunks and trim to requested length
+        final_output = torch.cat(chunks, dim=-1)[..., :max_new_tokens]
+        
+        # Clean up
+        self._cg_graph = None  # reset cuda graph
+        
+        return final_output
+
+    def _generate_chunk(self, prefix_conditioning, delayed_codes, inference_params, cfg_scale, sampling_params, progress_bar):
+        """Helper method containing core generation logic from original generate()"""
+        # (Most of the original generate() logic goes here, adapted for chunk-wise generation)
+        # This includes the token sampling loop, but operates only on the current chunk
+        # Initialize CUDA graph if enabled
+        if inference_params.use_cuda_graph and self._cg_graph is None:
+            self._init_cuda_graph(
+                prefix_conditioning.shape[-1],
+                delayed_codes.shape[-1],
+                inference_params
+            )
+
+        # Setup progress tracking
+        n_steps = delayed_codes.shape[-1] - prefix_conditioning.shape[-1]
+        if progress_bar:
+            progress = tqdm(total=n_steps, desc="Generating")
+        
+        # Initialize output tensor
+        output = delayed_codes.clone()
+        
+        # Token generation loop
+        for i in range(prefix_conditioning.shape[-1], delayed_codes.shape[-1]):
+            # Prepare input by combining prefix conditioning and current output
+            hidden_states = torch.cat([prefix_conditioning, output[..., :i]], dim=-1)
+            
+            # Get logits using cached CUDA graph or regular compute
+            if inference_params.use_cuda_graph and self._cg_graph is not None:
+                logits = self._cg_graph.replay()
+            else:
+                logits = self._compute_logits(hidden_states, inference_params, cfg_scale)
+            
+            # Sample next token for each codebook
+            for j in range(self.config.n_codebooks):
+                next_token = sample_token(
+                    logits[:, j],
+                    sampling_params,
+                    temperature=sampling_params.temp
+                )
+                output[:, j, i] = next_token
+            
+            if progress_bar:
+                progress.update(1)
+        
+        if progress_bar:
+            progress.close()
+            
+        return output
+
     @classmethod
     def from_pretrained(
         cls, repo_id: str, revision: str | None = None, device: str = DEFAULT_DEVICE, **kwargs

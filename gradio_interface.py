@@ -1,8 +1,11 @@
 import torch
 import torchaudio
 import gradio as gr
-from datetime import datetime
 from os import getenv
+from typing import Tuple
+import numpy as np
+import nltk
+import math
 
 from zonos.model import Zonos, DEFAULT_BACKBONE_CLS as ZonosBackbone
 from zonos.conditioning import make_cond_dict, supported_language_codes
@@ -13,6 +16,7 @@ CURRENT_MODEL = None
 
 SPEAKER_EMBEDDING = None
 SPEAKER_AUDIO_PATH = None
+
 
 def load_model_if_needed(model_choice: str):
     global CURRENT_MODEL_TYPE, CURRENT_MODEL
@@ -26,6 +30,7 @@ def load_model_if_needed(model_choice: str):
         CURRENT_MODEL_TYPE = model_choice
         print(f"{model_choice} model loaded successfully!")
     return CURRENT_MODEL
+
 
 def update_ui(model_choice):
     """
@@ -80,20 +85,124 @@ def update_ui(model_choice):
         unconditional_keys_update,
     )
 
+
+def generate_with_latent_windows(
+    model: Zonos,
+    text: str,
+    cond_dict: dict,
+    overlap_seconds: float = 0.1,
+    cfg_scale: float = 2.0,
+    min_p: float = 0.15,
+    seed: int = 420,
+) -> Tuple[int, np.ndarray]:
+    """Generate audio using sliding windows in latent space"""
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
+    
+    # Set global seed
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    
+    # Split into sentences
+    sentences = nltk.sent_tokenize(text)
+    if len(sentences) == 1:
+        # Single sentence - generate normally
+        torch.manual_seed(seed)
+        conditioning = model.prepare_conditioning(cond_dict)
+        codes = model.generate(
+            prefix_conditioning=conditioning,
+            max_new_tokens=86 * 120,  # 120 seconds max
+            cfg_scale=cfg_scale,
+            batch_size=1,
+            sampling_params=dict(min_p=min_p)
+        )
+        wav_out = model.autoencoder.decode(codes).cpu().detach()
+        return model.autoencoder.sampling_rate, wav_out.squeeze().numpy()
+
+    # Calculate window sizes in latent tokens
+    tokens_per_second = 86
+    overlap_size = int(overlap_seconds * tokens_per_second)
+    
+    all_codes = []
+    
+    for i, sentence in enumerate(sentences):
+        # Create conditioning for this sentence
+        sent_dict = cond_dict.copy()
+        sent_dict['espeak'] = ([sentence], [cond_dict['espeak'][1][0]])
+        
+        # Generate this sentence
+        torch.manual_seed(seed)
+        conditioning = model.prepare_conditioning(sent_dict)
+        codes = model.generate(
+            prefix_conditioning=conditioning,
+            max_new_tokens=int(len(sentence) * 1.5 * tokens_per_second / 10),
+            cfg_scale=cfg_scale,
+            batch_size=1,
+            sampling_params=dict(min_p=min_p)
+        )
+        
+        if i == 0:
+            all_codes.append(codes)
+            continue
+            
+        # Find best overlap position based on content similarity
+        overlap_a = all_codes[-1][..., -overlap_size:]
+        overlap_b = codes[..., :overlap_size]
+        
+        # Calculate similarity scores across the overlap region
+        similarity = torch.cosine_similarity(
+            overlap_a.float(), 
+            overlap_b.float(),
+            dim=1
+        ).mean(dim=0)
+        
+        # Find the position with highest similarity for crossfade
+        best_pos = torch.argmax(similarity)
+        effective_overlap = overlap_size - best_pos
+        
+        # Apply cosine fade for smooth transition
+        fade = torch.cos(torch.linspace(math.pi, 0, effective_overlap, device=codes.device))
+        fade = 0.5 * (1 + fade)
+        fade = fade.view(1, 1, -1)
+        
+        # Crossfade at the best position
+        overlap_region = (
+            overlap_a[..., -effective_overlap:] * (1 - fade) + 
+            overlap_b[..., -effective_overlap:] * fade
+        )
+        
+        # Replace overlap region in previous sentence
+        all_codes[-1] = torch.cat([
+            all_codes[-1][..., :-effective_overlap],
+            overlap_region
+        ], dim=-1)
+        
+        # Add new sentence (excluding overlap)
+        all_codes.append(codes[..., effective_overlap:])
+        
+        # Check total length
+        total_length = sum(c.shape[-1] for c in all_codes)
+        if total_length >= tokens_per_second * 120:  # 120 seconds max
+            break
+    
+    # Concatenate all sentences
+    final_codes = torch.cat(all_codes, dim=-1)
+    final_codes = final_codes.to(torch.long)
+    
+    # Decode to audio
+    wav_out = model.autoencoder.decode(final_codes).cpu().detach()
+    return model.autoencoder.sampling_rate, wav_out.squeeze().numpy()
+
+
 def generate_audio(
     model_choice,
     text,
     language,
     speaker_audio,
     prefix_audio,
-    e1,
-    e2,
-    e3,
-    e4,
-    e5,
-    e6,
-    e7,
-    e8,
+    e1, e2, e3, e4, e5, e6, e7, e8,
     vq_single,
     fmax,
     pitch_std,
@@ -102,14 +211,10 @@ def generate_audio(
     speaker_noised,
     cfg_scale,
     min_p,
-    top_p,
-    top_k,
-    temp,
-    reppen,
     seed,
     randomize_seed,
     unconditional_keys,
-    file_prefix,  #the parameter for custo mfilename prefix
+    use_windowing,
     progress=gr.Progress(),
 ):
     """
@@ -125,12 +230,10 @@ def generate_audio(
     dnsmos_ovrl = float(dnsmos_ovrl)
     cfg_scale = float(cfg_scale)
     min_p = float(min_p)
-    top_k = float(top_k)
-    temp = float(temp)
-    reppen = float(reppen)
     seed = int(seed)
-    max_new_tokens = 86 * 30
+    max_new_tokens = 86 * 60
 
+    # This is a bit ew, but works for now.
     global SPEAKER_AUDIO_PATH, SPEAKER_EMBEDDING
 
     if randomize_seed:
@@ -181,36 +284,32 @@ def generate_audio(
         progress((step, estimated_total_steps))
         return True
 
-    codes = selected_model.generate(
-        prefix_conditioning=conditioning,
-        audio_prefix_codes=audio_prefix_codes,
-        max_new_tokens=max_new_tokens,
-        cfg_scale=cfg_scale,
-        batch_size=1,
-        sampling_params=dict(min_p=min_p, top_k=top_k, top_p=top_p, temperature=temp, repetition_penalty=reppen),
-        callback=update_progress,
-    )
+    if use_windowing:
+        return generate_with_latent_windows(
+            selected_model,
+            text,
+            cond_dict,
+            overlap_seconds=0.1,
+            cfg_scale=cfg_scale,
+            min_p=min_p,
+            seed=seed
+        ), seed
+    else:
+        codes = selected_model.generate(
+            prefix_conditioning=conditioning,
+            audio_prefix_codes=audio_prefix_codes,
+            max_new_tokens=max_new_tokens,
+            cfg_scale=cfg_scale,
+            batch_size=1,
+            sampling_params=dict(min_p=min_p),
+            callback=update_progress,
+        )
 
-    wav_out = selected_model.autoencoder.decode(codes).cpu().detach()
-    sr_out = selected_model.autoencoder.sampling_rate
-    if wav_out.dim() == 2 and wav_out.size(0) > 1:
-        wav_out = wav_out[0:1, :]
-
-    # make sure the audio tensor is in the correct format (channels, samples)
-    wav_tensor = wav_out.squeeze(0)
-    if wav_tensor.ndim == 1:
-        wav_tensor = wav_tensor.unsqueeze(0)
-
-    # filename using the specified prefix and the current date and time
-    now_str = datetime.now().strftime("%Y%m%d-%H%M%S")
-    filename = f"{file_prefix}-{now_str}.wav"
-
-    # Save the audio to disk
-    torchaudio.save(filename, wav_tensor, sr_out)
-    print(f"Audio saved as {filename}")
-
-    # Return the file path for download along with the seed
-    return filename, seed
+        wav_out = selected_model.autoencoder.decode(codes).cpu().detach()
+        sr_out = selected_model.autoencoder.sampling_rate
+        if wav_out.dim() == 2 and wav_out.size(0) > 1:
+            wav_out = wav_out[0:1, :]
+        return (sr_out, wav_out.squeeze().numpy()), seed
 
 def build_interface():
     supported_models = []
@@ -266,14 +365,11 @@ def build_interface():
                 vq_single_slider = gr.Slider(0.5, 0.8, 0.78, 0.01, label="VQ Score")
                 pitch_std_slider = gr.Slider(0.0, 300.0, value=45.0, step=1, label="Pitch Std")
                 speaking_rate_slider = gr.Slider(5.0, 30.0, value=15.0, step=0.5, label="Speaking Rate")
+
             with gr.Column():
                 gr.Markdown("## Generation Parameters")
                 cfg_scale_slider = gr.Slider(1.0, 5.0, 2.0, 0.1, label="CFG Scale")
                 min_p_slider = gr.Slider(0.0, 1.0, 0.15, 0.01, label="Min P")
-                top_p_slider = gr.Slider(0.0, 1, 1, 0.01, label="Top P")
-                top_k_slider = gr.Slider(-1, 200, -1, 1, label="Top K")
-                temp_slider = gr.Slider(0.1, 5.0, 1, 0.01, label="Temp")
-                reppen_slider = gr.Slider(1, 5.0, 3, 0.01, label="RepPen")
                 seed_number = gr.Number(label="Seed", value=420, precision=0)
                 randomize_seed_toggle = gr.Checkbox(label="Randomize Seed (before generation)", value=True)
 
@@ -298,6 +394,15 @@ def build_interface():
                     value=["emotion"],
                     label="Unconditional Keys",
                 )
+
+            gr.Markdown(
+                "### Latent Windowing\n"
+                "This feature processes longer texts by breaking them into sentences and generating them separately with smooth transitions in latent space. "
+                "It works best when used with voice cloning (speaker audio) using Transformers (not hybrid) and may produce inconsistent results otherwise. "
+                "Enable this if you're doing voice cloning with longer texts."
+            )
+            use_windowing = gr.Checkbox(label="Enable Latent Windowing", value=False)
+
             gr.Markdown(
                 "### Emotion Sliders\n"
                 "Warning: The way these sliders work is not intuitive and may require some trial and error to get the desired effect.\n"
@@ -315,11 +420,8 @@ def build_interface():
                 emotion8 = gr.Slider(0.0, 1.0, 0.2, 0.05, label="Neutral")
 
         with gr.Column():
-            # Add a textbox for the custom filename prefix with default as "audio"
-            file_prefix = gr.Textbox(label="Filename Prefix", value="audio", interactive=True)
             generate_button = gr.Button("Generate Audio")
-            # Set output type to "filepath"
-            output_audio = gr.Audio(label="Generated Audio", type="filepath", autoplay=True)
+            output_audio = gr.Audio(label="Generated Audio", type="numpy", autoplay=True)
 
         model_choice.change(
             fn=update_ui,
@@ -347,7 +449,7 @@ def build_interface():
             ],
         )
 
-# On page load, trigger the same UI refresh
+        # On page load, trigger the same UI refresh
         demo.load(
             fn=update_ui,
             inputs=[model_choice],
@@ -373,7 +475,8 @@ def build_interface():
                 unconditional_keys,
             ],
         )
-# Generate audio on button click
+
+        # Generate audio on button click
         generate_button.click(
             fn=generate_audio,
             inputs=[
@@ -398,14 +501,10 @@ def build_interface():
                 speaker_noised_checkbox,
                 cfg_scale_slider,
                 min_p_slider,
-                top_p_slider,
-                top_k_slider,
-                temp_slider,
-                reppen_slider,
                 seed_number,
                 randomize_seed_toggle,
                 unconditional_keys,
-                file_prefix,  # new textbox input for filename prefix
+                use_windowing,
             ],
             outputs=[output_audio, seed_number],
         )

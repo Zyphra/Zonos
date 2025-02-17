@@ -10,7 +10,10 @@ services:
     network_mode: "host"
     stdin_open: true
     tty: true
-    command: ["python3", "gradio_interface.py"]
+    command: ["bash", "-c", "pip install nltk && python3 -c 'import nltk; nltk.download(\"punkt\"); nltk.download(\"punkt_tab\")' && python3 gradio_interface.py"]
     environment:
       - NVIDIA_VISIBLE_DEVICES=0
       - GRADIO_SHARE=False
+    volumes:
+      - .:/app
+      - ./cache:/root/.cache/

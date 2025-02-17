@@ -102,6 +102,10 @@ def generate_audio(
     speaker_noised,
     cfg_scale,
     min_p,
+    top_p,
+    top_k,
+    temp,
+    reppen,
     seed,
     randomize_seed,
     unconditional_keys,
@@ -121,6 +125,9 @@ def generate_audio(
     dnsmos_ovrl = float(dnsmos_ovrl)
     cfg_scale = float(cfg_scale)
     min_p = float(min_p)
+    top_k = float(top_k)
+    temp = float(temp)
+    reppen = float(reppen)
     seed = int(seed)
     max_new_tokens = 86 * 30
 
@@ -180,7 +187,7 @@ def generate_audio(
         max_new_tokens=max_new_tokens,
         cfg_scale=cfg_scale,
         batch_size=1,
-        sampling_params=dict(min_p=min_p),
+        sampling_params=dict(min_p=min_p, top_k=top_k, top_p=top_p, temperature=temp, repetition_penalty=reppen),
         callback=update_progress,
     )
 
@@ -263,6 +270,10 @@ def build_interface():
                 gr.Markdown("## Generation Parameters")
                 cfg_scale_slider = gr.Slider(1.0, 5.0, 2.0, 0.1, label="CFG Scale")
                 min_p_slider = gr.Slider(0.0, 1.0, 0.15, 0.01, label="Min P")
+                top_p_slider = gr.Slider(0.0, 1, 1, 0.01, label="Top P")
+                top_k_slider = gr.Slider(-1, 200, -1, 1, label="Top K")
+                temp_slider = gr.Slider(0.1, 5.0, 1, 0.01, label="Temp")
+                reppen_slider = gr.Slider(1, 5.0, 3, 0.01, label="RepPen")
                 seed_number = gr.Number(label="Seed", value=420, precision=0)
                 randomize_seed_toggle = gr.Checkbox(label="Randomize Seed (before generation)", value=True)
 
@@ -387,6 +398,10 @@ def build_interface():
                 speaker_noised_checkbox,
                 cfg_scale_slider,
                 min_p_slider,
+                top_p_slider,
+                top_k_slider,
+                temp_slider,
+                reppen_slider,
                 seed_number,
                 randomize_seed_toggle,
                 unconditional_keys,

@@ -94,6 +94,8 @@ _For repeated sampling we highly recommend using the gradio interface instead, a
 
 Note: Zonos can also run on CPU provided there is enough free RAM. However, this will be a lot slower than running on a dedicated GPU, and likely won't be sufficient for interactive use.
 
+For experimental windows support check out [this fork](https://github.com/sdbds/Zonos-for-windows).
+
 See also [Docker Installation](#docker-installation)
 
 #### System dependencies

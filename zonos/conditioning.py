@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 
 from zonos.config import PrefixConditionerConfig
+from zonos.utils import DEFAULT_DEVICE
 
 
 class Conditioner(nn.Module):
@@ -51,6 +52,8 @@ class Conditioner(nn.Module):
 
 
 # ------- ESPEAK CONTAINMENT ZONE ------------------------------------------------------------------------------------------------------------------------------------------------
+import os
+import sys
 import re
 import unicodedata
 
@@ -60,6 +63,9 @@ import torch.nn as nn
 from kanjize import number2kanji
 from phonemizer.backend import EspeakBackend
 from sudachipy import Dictionary, SplitMode
+
+if sys.platform == "darwin":
+    os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = "/opt/homebrew/lib/libespeak-ng.dylib"
 
 # --- Number normalization code from https://github.com/daniilrobnikov/vits2/blob/main/text/normalize_numbers.py ---
 
@@ -334,7 +340,7 @@ def make_cond_dict(
     dnsmos_ovrl: float = 4.0,
     speaker_noised: bool = False,
     unconditional_keys: Iterable[str] = {"vqscore_8", "dnsmos_ovrl"},
-    device: str = "cuda",
+    device: torch.device | str = DEFAULT_DEVICE,
 ) -> dict:
     """
     A helper to build the 'cond_dict' that the model expects.

@@ -6,7 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
 from huggingface_hub import hf_hub_download
-import os
+
+from zonos.utils import DEFAULT_DEVICE
 
 
 class logFbankCal(nn.Module):
@@ -353,12 +354,13 @@ class ECAPA_TDNN(nn.Module):
 
 
 class SpeakerEmbedding(nn.Module):
-    def __init__(self, ckpt_path: str = "ResNet293_SimAM_ASP_base.pt", device: str = "cuda"):
+    def __init__(self, ckpt_path: str = "ResNet293_SimAM_ASP_base.pt", device: str = DEFAULT_DEVICE):
         super().__init__()
         self.device = device
         with torch.device(device):
             self.model = ResNet293_based()
-            self.model.load_state_dict(torch.load(ckpt_path, weights_only=True, mmap=True))
+            state_dict = torch.load(ckpt_path, weights_only=True, mmap=True, map_location="cpu")
+            self.model.load_state_dict(state_dict)
             self.model.featCal = logFbankCal()
 
         self.requires_grad_(False).eval()
@@ -382,14 +384,18 @@ class SpeakerEmbedding(nn.Module):
         wav = self.prepare_input(wav, sample_rate).to(self.device, self.dtype)
         return self.model(wav).to(wav.device)
 
+
 class SpeakerEmbeddingLDA(nn.Module):
-    def __init__(
-        self,
-        device: str = "cuda",
-    ):
+    def __init__(self, device: str = DEFAULT_DEVICE):
         super().__init__()
-        spk_model_path = hf_hub_download(repo_id="Zyphra/Zonos-v0.1-speaker-embedding", filename="ResNet293_SimAM_ASP_base.pt")
-        lda_spk_model_path = hf_hub_download(repo_id="Zyphra/Zonos-v0.1-speaker-embedding", filename="ResNet293_SimAM_ASP_base_LDA-128.pt")
+        spk_model_path = hf_hub_download(
+            repo_id="Zyphra/Zonos-v0.1-speaker-embedding",
+            filename="ResNet293_SimAM_ASP_base.pt",
+        )
+        lda_spk_model_path = hf_hub_download(
+            repo_id="Zyphra/Zonos-v0.1-speaker-embedding",
+            filename="ResNet293_SimAM_ASP_base_LDA-128.pt",
+        )
 
         self.device = device
         with torch.device(device):

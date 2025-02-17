@@ -22,7 +22,7 @@ Our model enables highly natural speech generation from text prompts when given 
 
 ##### For more details and speech samples, check out our blog [here](https://www.zyphra.com/post/beta-release-of-zonos-v0-1)
 
-##### We also have a hosted version available at [maia.zyphra.com/audio](https://maia.zyphra.com/audio)
+##### We also have a hosted version available at [playground.zyphra.com/audio](https://playground.zyphra.com/audio)
 
 ---
 
@@ -47,9 +47,10 @@ import torch
 import torchaudio
 from zonos.model import Zonos
 from zonos.conditioning import make_cond_dict
+from zonos.utils import DEFAULT_DEVICE as device
 
-# model = Zonos.from_pretrained("Zyphra/Zonos-v0.1-hybrid", device="cuda")
-model = Zonos.from_pretrained("Zyphra/Zonos-v0.1-transformer", device="cuda")
+# model = Zonos.from_pretrained("Zyphra/Zonos-v0.1-hybrid", device=device)
+model = Zonos.from_pretrained("Zyphra/Zonos-v0.1-transformer", device=device)
 
 wav, sampling_rate = torchaudio.load("assets/exampleaudio.mp3")
 speaker = model.make_speaker_embedding(wav, sampling_rate)
@@ -86,7 +87,14 @@ _For repeated sampling we highly recommend using the gradio interface instead, a
 
 ## Installation
 
-**At the moment this repository only supports Linux systems (preferably Ubuntu 22.04/24.04) with recent NVIDIA GPUs (3000-series or newer, 6GB+ VRAM).**
+#### System requirements
+
+- **Operating System:** Linux (preferably Ubuntu 22.04/24.04), macOS
+- **GPU:** 6GB+ VRAM, Hybrid additionally requires a 3000-series or newer Nvidia GPU
+
+Note: Zonos can also run on CPU provided there is enough free RAM. However, this will be a lot slower than running on a dedicated GPU, and likely won't be sufficient for interactive use.
+
+For experimental windows support check out [this fork](https://github.com/sdbds/Zonos-for-windows).
 
 See also [Docker Installation](#docker-installation)
 
@@ -95,7 +103,8 @@ See also [Docker Installation](#docker-installation)
 Zonos depends on the eSpeak library phonemization. You can install it on Ubuntu with the following command:
 
 ```bash
-apt install -y espeak-ng
+apt install -y espeak-ng # For Ubuntu
+# brew install espeak-ng # For MacOS
 ```
 
 #### Python dependencies
@@ -106,21 +115,22 @@ We highly recommend using a recent version of [uv](https://docs.astral.sh/uv/#in
 
 ```bash
 uv sync
-uv sync --extra compile
+uv sync --extra compile # optional but needed to run the hybrid
+uv pip install -e .
 ```
 
 ##### Installing into the system/actived environment using uv
 
 ```bash
 uv pip install -e .
-uv pip install -e .[compile]
+uv pip install -e .[compile] # optional but needed to run the hybrid
 ```
 
 ##### Installing into the system/actived environment using pip
 
 ```bash
 pip install -e .
-pip install --no-build-isolation -e .[compile]
+pip install --no-build-isolation -e .[compile] # optional but needed to run the hybrid
 ```
 
 ##### Confirm that it's working

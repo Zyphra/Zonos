@@ -1,6 +1,29 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
+import torch
+
+
+# https://github.com/state-spaces/mamba/blob//mamba_ssm/utils/generation.py#L18
+@dataclass
+class InferenceParams:
+    """Inference parameters that are passed to the main model in order
+    to efficienly calculate and store the context during inference."""
+
+    max_seqlen: int
+    max_batch_size: int
+    seqlen_offset: int = 0
+    batch_size_offset: int = 0
+    key_value_memory_dict: dict = field(default_factory=dict)
+    lengths_per_sample: torch.Tensor | None = None
+
+    def reset(self, max_seqlen, max_batch_size):
+        self.max_seqlen = max_seqlen
+        self.max_batch_size = max_batch_size
+        self.seqlen_offset = 0
+        if self.lengths_per_sample is not None:
+            self.lengths_per_sample.zero_()
+
 
 @dataclass
 class BackboneConfig:
@@ -28,6 +51,7 @@ class ZonosConfig:
     prefix_conditioner: PrefixConditionerConfig
     eos_token_id: int = 1024
     masked_token_id: int = 1025
+    pad_vocab_to_multiple_of: int = 8
 
     @classmethod
     def from_dict(cls, d: dict) -> "ZonosConfig":

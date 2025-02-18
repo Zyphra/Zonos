@@ -46,9 +46,18 @@ class PrefixConditionerConfig:
 
 
 @dataclass
+class GenerationConfig:
+    default_chunk_size: int = 86 * 10  # 10 seconds
+    default_overlap_size: int = 86 * 2  # 2 seconds
+    max_tokens: int = 86 * 60  # 60 seconds
+    interpolation_method: Literal["linear", "cosine"] = "linear"
+
+
+@dataclass
 class ZonosConfig:
     backbone: BackboneConfig
     prefix_conditioner: PrefixConditionerConfig
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
     eos_token_id: int = 1024
     masked_token_id: int = 1025
     pad_vocab_to_multiple_of: int = 8

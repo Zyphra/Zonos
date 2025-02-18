@@ -30,7 +30,7 @@ compile = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["zonos"]
+include = ["zonos", "zonos.*"]
 
 [tool.uv]
 no-build-isolation-package = ["flash-attn", "mamba-ssm", "causal-conv1d"]

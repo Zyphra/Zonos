@@ -64,7 +64,7 @@ from kanjize import number2kanji
 from phonemizer.backend import EspeakBackend
 from sudachipy import Dictionary, SplitMode
 
-if sys.platform == "darwin":
+if sys.platform == "darwin" and "PHONEMIZER_ESPEAK_LIBRARY" not in os.environ:
     os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = "/opt/homebrew/lib/libespeak-ng.dylib"
 
 # --- Number normalization code from https://github.com/daniilrobnikov/vits2/blob/main/text/normalize_numbers.py ---

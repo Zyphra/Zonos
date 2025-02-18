@@ -1,11 +1,12 @@
 import json
-from typing import Callable
+from typing import Callable, Generator
 
 import safetensors
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
 from tqdm import tqdm
+import numpy as np
 
 from zonos.autoencoder import DACAutoencoder
 from zonos.backbone import BACKBONES
@@ -313,3 +314,108 @@ class Zonos(nn.Module):
         self._cg_graph = None  # reset cuda graph to avoid cache changes
 
         return out_codes
+
+    @torch.inference_mode()
+    def stream(
+        self,
+        prefix_conditioning: torch.Tensor,            # conditioning from text (and other modalities)
+        audio_prefix_codes: torch.Tensor | None = None,  # optional audio prefix codes
+        max_new_tokens: int = 86 * 30,
+        cfg_scale: float = 2.0,
+        batch_size: int = 1,
+        sampling_params: dict = dict(min_p=0.1),
+        disable_torch_compile: bool = False,
+        chunk_size: int = 10,   # yield a new audio chunk every chunk_size tokens
+    ) -> Generator[tuple[int, np.ndarray], None, None]:
+        assert cfg_scale != 1, "TODO: add support for cfg_scale=1"
+        prefix_audio_len = 0 if audio_prefix_codes is None else audio_prefix_codes.shape[2]
+        device = self.device
+
+        # Use CUDA Graphs if supported, and torch.compile otherwise.
+        cg = self.can_use_cudagraphs()
+        decode_one_token = self._decode_one_token
+        decode_one_token = torch.compile(decode_one_token, dynamic=True, disable=cg or disable_torch_compile)
+
+        unknown_token = -1
+        audio_seq_len = prefix_audio_len + max_new_tokens
+        seq_len = prefix_conditioning.shape[1] + audio_seq_len + 9
+
+        with torch.device(device):
+            inference_params = self.setup_cache(batch_size=batch_size * 2, max_seqlen=seq_len)
+            codes = torch.full((batch_size, 9, audio_seq_len), unknown_token)
+
+        if audio_prefix_codes is not None:
+            codes[..., :prefix_audio_len] = audio_prefix_codes
+
+        delayed_codes = apply_delay_pattern(codes, self.masked_token_id)
+
+        delayed_prefix_audio_codes = delayed_codes[..., : prefix_audio_len + 1]
+
+        logits = self._prefill(prefix_conditioning, delayed_prefix_audio_codes, inference_params, cfg_scale)
+        next_token = sample_from_logits(logits, **sampling_params)
+
+        offset = delayed_prefix_audio_codes.shape[2]
+        frame = delayed_codes[..., offset : offset + 1]
+        frame.masked_scatter_(frame == unknown_token, next_token)
+
+        prefix_length = prefix_conditioning.shape[1] + prefix_audio_len + 1
+        inference_params.seqlen_offset += prefix_length
+        inference_params.lengths_per_sample[:] += prefix_length
+
+        logit_bias = torch.zeros_like(logits)
+        logit_bias[:, 1:, self.eos_token_id] = -torch.inf  # only allow codebook 0 to predict EOS
+
+        # --- Autoregressive loop ---
+        stopping = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        max_steps = delayed_codes.shape[2] - offset
+        remaining_steps = torch.full((batch_size,), max_steps, device=device)
+        cfg_scale = torch.tensor(cfg_scale)
+        step = 0
+        # This variable will let us yield only the new audio since the last yield.
+        prev_valid_length = 0
+
+        while torch.max(remaining_steps) > 0:
+            offset += 1
+            input_ids = delayed_codes[..., offset - 1 : offset]
+            logits = decode_one_token(input_ids, inference_params, cfg_scale, allow_cudagraphs=cg)
+            logits += logit_bias
+
+            next_token = sample_from_logits(logits, generated_tokens=delayed_codes[..., :offset], **sampling_params)
+
+            # Update stopping for finished samples.
+            eos_in_cb0 = next_token[:, 0] == self.eos_token_id
+            remaining_steps[eos_in_cb0[:, 0]] = torch.minimum(remaining_steps[eos_in_cb0[:, 0]], torch.tensor(9))
+            stopping |= eos_in_cb0[:, 0]
+
+            eos_codebook_idx = 9 - remaining_steps
+            eos_codebook_idx = torch.clamp(eos_codebook_idx, max=9 - 1)
+            for i in range(next_token.shape[0]):
+                if stopping[i]:
+                    idx = eos_codebook_idx[i].item()
+                    next_token[i, :idx] = self.masked_token_id
+                    next_token[i, idx] = self.eos_token_id
+
+            frame = delayed_codes[..., offset : offset + 1]
+            frame.masked_scatter_(frame == unknown_token, next_token)
+            inference_params.seqlen_offset += 1
+            inference_params.lengths_per_sample[:] += 1
+            remaining_steps -= 1
+            step += 1
+
+            # --- Every 'chunk_size' tokens (or when finished), decode and yield the new audio ---
+            if (step % chunk_size == 0) or (torch.all(remaining_steps == 0)):
+                # In Zonos, the final output codes are produced by reverting the delay pattern.
+                # Only tokens up to (offset - 9) are valid.
+                
+                full_codes = revert_delay_pattern(delayed_codes)
+                full_codes.masked_fill_(full_codes >= 1024, 0)
+                # Get the valid portion of the latent sequence.
+                valid_length = offset - 9
+                partial_codes = full_codes[..., prev_valid_length:valid_length]
+
+                prev_valid_length = valid_length
+
+                # Yield a tuple: (sampling_rate, audio_chunk) where audio_chunk is a numpy array.
+                yield (self.autoencoder.sampling_rate, partial_codes)
+
+        self._cg_graph = None  # reset CUDA graph to avoid caching issues

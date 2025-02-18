@@ -142,7 +142,7 @@ def normalize_numbers(text: str) -> str:
 PAD_ID, UNK_ID, BOS_ID, EOS_ID = 0, 1, 2, 3
 SPECIAL_TOKEN_IDS = [PAD_ID, UNK_ID, BOS_ID, EOS_ID]
 
-_punctuation = ';:,.!?¡¿—…"«»“”() *~-/\\&'
+_punctuation = ';:,.!?¡¿—…"«»""() *~-/\\&'
 _letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 _letters_ipa = (
     "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ"
@@ -188,31 +188,59 @@ def clean(texts: list[str], languages: list[str]) -> list[str]:
 
 @cache
 def get_backend(language: str) -> "EspeakBackend":
+    """Get phonemizer backend for a given language."""
     import logging
-
     from phonemizer.backend import EspeakBackend
 
     logger = logging.getLogger("phonemizer")
-    backend = EspeakBackend(
-        language,
-        preserve_punctuation=True,
-        with_stress=True,
-        punctuation_marks=_punctuation,
-        logger=logger,
-    )
-    logger.setLevel(logging.ERROR)
-    return backend
+    
+    # Map language codes to their espeak variants
+    language_mapping = {
+        "uz": "uzb",  # Uzbek needs to use 'uzb' for espeak
+    }
+    
+    # Use mapped language code if available
+    espeak_language = language_mapping.get(language, language)
+    
+    try:
+        backend = EspeakBackend(
+            espeak_language,
+            preserve_punctuation=True,
+            with_stress=True,
+            punctuation_marks=_punctuation,
+            logger=logger,
+        )
+        logger.setLevel(logging.ERROR)
+        return backend
+    except RuntimeError as e:
+        print(f"Warning: Language {language} (espeak: {espeak_language}) failed, falling back to en-us")
+        backend = EspeakBackend(
+            "en-us",
+            preserve_punctuation=True,
+            with_stress=True,
+            punctuation_marks=_punctuation,
+            logger=logger,
+        )
+        logger.setLevel(logging.ERROR)
+        return backend
 
 
 def phonemize(texts: list[str], languages: list[str]) -> list[str]:
+    """Phonemize text using appropriate backend for each language."""
     texts = clean(texts, languages)
-
+    
     batch_phonemes = []
     for text, language in zip(texts, languages):
         backend = get_backend(language)
-        phonemes = backend.phonemize([text], strip=True)
-        batch_phonemes.append(phonemes[0])
-
+        try:
+            phonemes = backend.phonemize([text], strip=True)
+            batch_phonemes.append(phonemes[0])
+        except:
+            # If phonemization fails, fall back to English
+            fallback_backend = get_backend("en-us")
+            phonemes = fallback_backend.phonemize([text], strip=True)
+            batch_phonemes.append(phonemes[0])
+    
     return batch_phonemes
 
 

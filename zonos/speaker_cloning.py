@@ -29,9 +29,19 @@ class logFbankCal(nn.Module):
         )
 
     def forward(self, x):
+        # Ensure input is 2D (batch, time)
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        
+        # Calculate mel spectrogram
         out = self.fbankCal(x)
+        
+        # Apply log scale with small offset for numerical stability
         out = torch.log(out + 1e-6)
-        out = out - out.mean(axis=2).unsqueeze(dim=2)
+        
+        # Normalize along time dimension (last dimension)
+        out = out - out.mean(dim=-1, keepdim=True)
+        
         return out
 
 

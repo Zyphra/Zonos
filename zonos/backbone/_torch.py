@@ -6,9 +6,11 @@ from torch.nn import functional as F
 from zonos.config import BackboneConfig, InferenceParams
 
 
-def precompute_freqs_cis(seq_len: int, n_elem: int, base: float = 10000) -> torch.Tensor:
+def precompute_freqs_cis(seq_len: int, n_elem: int, base: float = 10000, device: torch.device = None) -> torch.Tensor:
     freqs = 1.0 / (base ** (torch.arange(0, n_elem, 2)[: (n_elem // 2)].float() / n_elem))
-    t = torch.arange(seq_len, device=freqs.device)
+    if device is not None:
+        freqs = freqs.to(device)
+    t = torch.arange(seq_len, device=device)
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
     cache = torch.stack([freqs_cis.real, freqs_cis.imag], dim=-1)
@@ -36,6 +38,12 @@ def _update_kv_cache(
     """k/v: (batch_size, seqlen, nheads, head_dim) or (batch_size, 1, nheads, head_dim)"""
     assert layer_idx in inference_params.key_value_memory_dict
     kv_cache, _ = inference_params.key_value_memory_dict[layer_idx]
+    
+    # Ensure kv_cache is on the same device as k and v
+    if kv_cache.device != k.device:
+        kv_cache = kv_cache.to(k.device)
+        inference_params.key_value_memory_dict[layer_idx] = (kv_cache, None)
+    
     # Adjust key and value for inference
     batch_start = inference_params.batch_size_offset
     batch_end = batch_start + k.shape[0]
@@ -64,17 +72,26 @@ class TorchZonosBackbone(nn.Module):
     def allocate_inference_cache(self, batch_size: int, max_seqlen: int, dtype: torch.dtype = torch.bfloat16):
         # TODO: This function should be pure
         head_dim = self.config.d_model // self.config.attn_cfg["num_heads"]
-        self.freqs_cis = precompute_freqs_cis(16384, head_dim)
+        device = next(self.parameters()).device
+        self.freqs_cis = precompute_freqs_cis(16384, head_dim, device=device)
         return {
             i: layer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype)
             for i, layer in enumerate(self.layers)
         }
 
     def forward(self, hidden_states: torch.Tensor, inference_params: InferenceParams) -> torch.Tensor:
-        input_pos = torch.arange(0, hidden_states.shape[1], device=hidden_states.device)
+        device = hidden_states.device
+        # Move all tensors to the same device at the start
+        if inference_params.lengths_per_sample.device != device:
+            inference_params.lengths_per_sample = inference_params.lengths_per_sample.to(device)
+        if self.freqs_cis.device != device:
+            self.freqs_cis = self.freqs_cis.to(device)
+            
+        input_pos = torch.arange(0, hidden_states.shape[1], device=device)
         input_pos = input_pos + inference_params.lengths_per_sample.unsqueeze(-1)
 
         freqs_cis = self.freqs_cis[input_pos].expand(hidden_states.shape[0], -1, -1, -1)
+        
         for i, layer in enumerate(self.layers):
             hidden_states = layer(hidden_states, inference_params, freqs_cis)
         return self.norm_f(hidden_states)
@@ -94,7 +111,8 @@ class TransformerBlock(nn.Module):
         self.head_dim = config.d_model // config.attn_cfg["num_heads"]
 
     def allocate_inference_cache(self, batch_size: int, max_seqlen: int, dtype: torch.dtype = torch.bfloat16):
-        return torch.empty(batch_size, max_seqlen, 2, self.num_heads_kv, self.head_dim, dtype=dtype), None
+        device = next(self.parameters()).device
+        return torch.empty(batch_size, max_seqlen, 2, self.num_heads_kv, self.head_dim, dtype=dtype, device=device), None
 
     def forward(self, x: torch.Tensor, inference_params: InferenceParams, freqs_cis: torch.Tensor) -> torch.Tensor:
         x = x + self.mixer(self.norm(x), inference_params, freqs_cis)

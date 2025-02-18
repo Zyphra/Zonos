@@ -75,6 +75,74 @@ This should produce a `sample.wav` file in your project root directory.
 
 _For repeated sampling we highly recommend using the gradio interface instead, as the minimal example needs to load the model every time it is run._
 
+
+## Fine-Tuning / Training
+
+We provide a script, training.py, to demonstrate how you can fine-tune or adapt Zonos on your own data, or on a public dataset like Mozilla Common Voice.
+
+
+### Requirements
+
+- A GPU with sufficient VRAM (6GB+ recommended). CPU training is possible but extremely slow.
+- PyTorch and torchaudio
+- The Hugging Face datasets library
+- Enough disk space to download your chosen dataset (e.g., Common Voice can be quite large depending on language).
+- If you plan to train the “hybrid” version, you must install CUDA-specific requirements (see Installation).
+
+### Usage
+
+#### 1. Clone or download the Zonos repository:
+```bash
+git clone https://github.com/Zyphra/Zonos.git
+cd Zonos
+```
+#### 2. Install dependencies (e.g., in a virtual environment):
+```bash
+uv sync
+uv sync --extra compile # optional but needed to run the hybrid
+uv pip install -e .
+```
+#### 3. Edit training parameters if needed. By default, training.py uses:
+
+- **Model:** Zyphra/Zonos-v0.1-transformer
+- **Dataset:** mozilla-foundation/common_voice_17_0
+- **Language:** uz
+- `num_epochs=10`, `batch_size=8`, `learning_rate=1e-4`
+- **Output directory:** `checkpoints`
+
+#### 4. Run the training script:
+```bash
+uv run training.py
+```
+
+#### The script will:
+
+- Load the specified dataset and the Zonos model
+- Resample audio to 16kHz (adjust in code if necessary)
+- Compute speaker embeddings for each sample
+- Prepare text/language conditioning
+- Forward through Zonos to predict codes
+- Calculate cross-entropy loss
+- Save periodic checkpoints to the checkpoints folder
+
+#### 5. Customizing training:
+- **Change model:** Pass --model_path to specify another pretrained checkpoint (e.g., the hybrid).
+- **Change dataset:** Pass --dataset_name with a Hugging Face dataset or your custom dataset.
+- **Modify hyperparams:** e.g., `--learning_rate 1e-5`, `--num_epochs 5`, etc.
+- **Output directory:** Use `--output_dir` to choose a different folder for checkpoints.
+
+#### Example command:
+```bash
+uv run training.py 
+     --model_path Zyphra/Zonos-v0.1-hybrid
+     --dataset_name mozilla-foundation/common_voice_17_0 
+     --language uz 
+     --output_dir checkpoints 
+     --num_epochs 10 
+     --batch_size 8 
+     --learning_rate 1e-4
+```
+
 ## Features
 
 - Zero-shot TTS with voice cloning: Input desired text and a 10-30s speaker sample to generate high quality TTS output

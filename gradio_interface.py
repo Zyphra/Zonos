@@ -203,7 +203,7 @@ def generate_audio(
     return (sr_out, wav_out.squeeze().numpy()), seed
 
 
-def build_interface():
+def build_interface(analytics, title):
     supported_models = []
     if "transformer" in ZonosBackbone.supported_architectures:
         supported_models.append("Zyphra/Zonos-v0.1-transformer")
@@ -216,7 +216,7 @@ def build_interface():
             "| This probably means the mamba-ssm library has not been installed."
         )
 
-    with gr.Blocks() as demo:
+    with gr.Blocks(analytics_enabled=analytics, title=title) as demo:
         with gr.Row():
             with gr.Column():
                 model_choice = gr.Dropdown(
@@ -414,6 +414,8 @@ def build_interface():
 
 
 if __name__ == "__main__":
-    demo = build_interface()
+    analytics = getenv("GRADIO_ANALYTICS_ENABLED", "False").lower() in ("true", "1", "t")
+    title = getenv("APP_NAME", "Zonos")
+    demo = build_interface(analytics, title)
     share = getenv("GRADIO_SHARE", "False").lower() in ("true", "1", "t")
     demo.launch(server_name="0.0.0.0", server_port=7860, share=share)

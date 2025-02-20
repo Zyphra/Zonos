@@ -14,3 +14,4 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=0
       - GRADIO_SHARE=False
+      - GRADIO_ANALYTICS_ENABLED=False

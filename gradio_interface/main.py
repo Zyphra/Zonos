@@ -2,7 +2,6 @@ import torch
 import torchaudio
 import gradio as gr
 from os import getenv
-
 from zonos.model import Zonos, DEFAULT_BACKBONE_CLS as ZonosBackbone
 from zonos.conditioning import make_cond_dict, supported_language_codes
 from zonos.utils import DEFAULT_DEVICE as device
@@ -268,10 +267,21 @@ def build_interface():
             with gr.Row():
                 with gr.Column():
                     gr.Markdown("### NovelAi's unified sampler")
-                    linear_slider = gr.Slider(-2.0, 2.0, 0.5, 0.01, label="Linear (set to 0 to disable unified sampling)", info="High values make the output less random.")
-                    #Conf's theoretical range is between -2 * Quad and 0.
-                    confidence_slider = gr.Slider(-2.0, 2.0, 0.40, 0.01, label="Confidence", info="Low values make random outputs more random.")
-                    quadratic_slider = gr.Slider(-2.0, 2.0, 0.00, 0.01, label="Quadratic", info="High values make low probablities much lower.")
+                    linear_slider = gr.Slider(
+                        -2.0,
+                        2.0,
+                        0.5,
+                        0.01,
+                        label="Linear (set to 0 to disable unified sampling)",
+                        info="High values make the output less random.",
+                    )
+                    # Conf's theoretical range is between -2 * Quad and 0.
+                    confidence_slider = gr.Slider(
+                        -2.0, 2.0, 0.40, 0.01, label="Confidence", info="Low values make random outputs more random."
+                    )
+                    quadratic_slider = gr.Slider(
+                        -2.0, 2.0, 0.00, 0.01, label="Quadratic", info="High values make low probablities much lower."
+                    )
                 with gr.Column():
                     gr.Markdown("### Legacy sampling")
                     top_p_slider = gr.Slider(0.0, 1.0, 0, 0.01, label="Top P")

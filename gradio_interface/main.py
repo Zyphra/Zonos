@@ -1,7 +1,10 @@
+import tempfile
+from scipy.stats import yeojohnson
 import torch
 import torchaudio
 import gradio as gr
 from os import getenv
+from .utils import process_file
 from zonos.model import Zonos, DEFAULT_BACKBONE_CLS as ZonosBackbone
 from zonos.conditioning import make_cond_dict, supported_language_codes
 from zonos.utils import DEFAULT_DEVICE as device
@@ -37,6 +40,7 @@ def update_ui(model_choice):
     print("Conditioners in this model:", cond_names)
 
     text_update = gr.update(visible=("espeak" in cond_names))
+    file_update = gr.update(visible=("espeak" in cond_names))
     language_update = gr.update(visible=("espeak" in cond_names))
     speaker_audio_update = gr.update(visible=("speaker" in cond_names))
     prefix_audio_update = gr.update(visible=True)
@@ -60,6 +64,7 @@ def update_ui(model_choice):
 
     return (
         text_update,
+        file_update,
         language_update,
         speaker_audio_update,
         prefix_audio_update,
@@ -84,6 +89,7 @@ def update_ui(model_choice):
 def generate_audio(
     model_choice,
     text,
+    file,
     language,
     speaker_audio,
     prefix_audio,
@@ -140,66 +146,101 @@ def generate_audio(
     if randomize_seed:
         seed = torch.randint(0, 2**32 - 1, (1,)).item()
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-    if speaker_audio is not None and "speaker" not in unconditional_keys:
-        if speaker_audio != SPEAKER_AUDIO_PATH:
-            print("Recomputed speaker embedding")
-            wav, sr = torchaudio.load(speaker_audio)
-            SPEAKER_EMBEDDING = selected_model.make_speaker_embedding(wav, sr)
-            SPEAKER_EMBEDDING = SPEAKER_EMBEDDING.to(device, dtype=torch.bfloat16)
-            SPEAKER_AUDIO_PATH = speaker_audio
+    try:
+        # Handle input content
+        content_path = None
+        if file is not None:
+            content_path = file
+        elif text.strip():
+            # Save text to temporary file
+            with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
+                f.write(text)
+                content_path = f.name
 
-    audio_prefix_codes = None
-    if prefix_audio is not None:
-        wav_prefix, sr_prefix = torchaudio.load(prefix_audio)
-        wav_prefix = wav_prefix.mean(0, keepdim=True)
-        wav_prefix = selected_model.autoencoder.preprocess(wav_prefix, sr_prefix)
-        wav_prefix = wav_prefix.to(device, dtype=torch.float32)
-        audio_prefix_codes = selected_model.autoencoder.encode(wav_prefix.unsqueeze(0))
+        if not content_path:
+            raise gr.Error("Please provide either text input or upload a document file")
 
-    emotion_tensor = torch.tensor(list(map(float, [e1, e2, e3, e4, e5, e6, e7, e8])), device=device)
+        if speaker_audio is not None and "speaker" not in unconditional_keys:
+            if speaker_audio != SPEAKER_AUDIO_PATH:
+                print("Recomputed speaker embedding")
+                wav, sr = torchaudio.load(speaker_audio)
+                SPEAKER_EMBEDDING = selected_model.make_speaker_embedding(wav, sr)
+                SPEAKER_EMBEDDING = SPEAKER_EMBEDDING.to(device, dtype=torch.bfloat16)
+                SPEAKER_AUDIO_PATH = speaker_audio
 
-    vq_val = float(vq_single)
-    vq_tensor = torch.tensor([vq_val] * 8, device=device).unsqueeze(0)
+        audio_prefix_codes = None
+        if prefix_audio is not None:
+            wav_prefix, sr_prefix = torchaudio.load(prefix_audio)
+            wav_prefix = wav_prefix.mean(0, keepdim=True)
+            wav_prefix = selected_model.autoencoder.preprocess(wav_prefix, sr_prefix)
+            wav_prefix = wav_prefix.to(device, dtype=torch.float32)
+            audio_prefix_codes = selected_model.autoencoder.encode(wav_prefix.unsqueeze(0))
 
-    cond_dict = make_cond_dict(
-        text=text,
-        language=language,
-        speaker=SPEAKER_EMBEDDING,
-        emotion=emotion_tensor,
-        vqscore_8=vq_tensor,
-        fmax=fmax,
-        pitch_std=pitch_std,
-        speaking_rate=speaking_rate,
-        dnsmos_ovrl=dnsmos_ovrl,
-        speaker_noised=speaker_noised_bool,
-        device=device,
-        unconditional_keys=unconditional_keys,
-    )
-    conditioning = selected_model.prepare_conditioning(cond_dict)
+        emotion_tensor = torch.tensor(list(map(float, [e1, e2, e3, e4, e5, e6, e7, e8])), device=device)
 
-    estimated_generation_duration = 30 * len(text) / 400
-    estimated_total_steps = int(estimated_generation_duration * 86)
+        vq_val = float(vq_single)
+        vq_tensor = torch.tensor([vq_val] * 8, device=device).unsqueeze(0)
 
-    def update_progress(_frame: torch.Tensor, step: int, _total_steps: int) -> bool:
-        progress((step, estimated_total_steps))
-        return True
+        text_chunks = process_file(content_path, 35)  # hard coded for now, could add a slider
+        total_chunks = len(text_chunks)
+        gr.Info(f"Text split into {total_chunks} chunks. Starting synthesis...")
 
-    codes = selected_model.generate(
-        prefix_conditioning=conditioning,
-        audio_prefix_codes=audio_prefix_codes,
-        max_new_tokens=max_new_tokens,
-        cfg_scale=cfg_scale,
-        batch_size=1,
-        sampling_params=dict(top_p=top_p, top_k=top_k, min_p=min_p, linear=linear, conf=confidence, quad=quadratic),
-        callback=update_progress,
-    )
+        # Chunked Generation (unlimited content, yay!)
+        for idx, chunk in enumerate(text_chunks, 1):
+            if chunk.strip():
+                continue
+            gr.Info(f"Generating chunk {idx}/{total_chunks}...")
 
-    wav_out = selected_model.autoencoder.decode(codes).cpu().detach()
-    sr_out = selected_model.autoencoder.sampling_rate
-    if wav_out.dim() == 2 and wav_out.size(0) > 1:
-        wav_out = wav_out[0:1, :]
-    return (sr_out, wav_out.squeeze().numpy()), seed
+            estimated_generation_duration = 30 * len(chunk) / 400
+            estimated_total_steps = int(estimated_generation_duration * 86)
+
+            def update_progress(_frame: torch.Tensor, step: int, _total_steps: int) -> bool:
+                progress((step, estimated_total_steps))
+                return True
+
+            cond_dict = make_cond_dict(
+                text=chunk.strip(),
+                language=language,
+                speaker=SPEAKER_EMBEDDING,
+                emotion=emotion_tensor,
+                vqscore_8=vq_tensor,
+                fmax=fmax,
+                pitch_std=pitch_std,
+                speaking_rate=speaking_rate,
+                dnsmos_ovrl=dnsmos_ovrl,
+                speaker_noised=speaker_noised_bool,
+                device=device,
+                unconditional_keys=unconditional_keys,
+            )
+            conditioning = selected_model.prepare_conditioning(cond_dict)
+
+            codes = selected_model.generate(
+                prefix_conditioning=conditioning,
+                audio_prefix_codes=audio_prefix_codes,
+                max_new_tokens=max_new_tokens,
+                cfg_scale=cfg_scale,
+                batch_size=1,
+                sampling_params=dict(
+                    top_p=top_p, top_k=top_k, min_p=min_p, linear=linear, conf=confidence, quad=quadratic
+                ),
+                callback=update_progress,
+            )
+
+            wav_out = selected_model.autoencoder.decode(codes).cpu().detach()
+            sr_out = selected_model.autoencoder.sampling_rate
+            if wav_out.dim() == 2 and wav_out.size(0) > 1:
+                wav_out = wav_out[0:1, :]
+
+            # add sub-sec silence between chunks
+            silence = torch.zeros(1, int(selected_model.autoencoder.sampling_rate * 0.4))
+            wav_out = torch.cat([wav_out, silence], dim=1)
+            yield (sr_out, wav_out.squeeze().numpy()), seed
+
+    except Exception as e:
+        gr.Error(str(e))
 
 
 def build_interface():
@@ -218,18 +259,22 @@ def build_interface():
     with gr.Blocks() as demo:
         with gr.Row():
             with gr.Column():
+                with gr.Tab("Text Input"):
+                    text = gr.Textbox(
+                        label="Text to Synthesize",
+                        placeholder="Enter the text you want to convert to speech...",
+                        lines=5,
+                        max_length=500,
+                    )
+                with gr.Tab("File Upload"):
+                    file = gr.File(label="Upload Document", file_types=[".txt", ".pdf", ".xlsx", ".docx"])
                 model_choice = gr.Dropdown(
                     choices=supported_models,
                     value=supported_models[0],
                     label="Zonos Model Type",
                     info="Select the model variant to use.",
                 )
-                text = gr.Textbox(
-                    label="Text to Synthesize",
-                    value="Zonos uses eSpeak for text to phoneme conversion!",
-                    lines=4,
-                    max_length=500,  # approximately
-                )
+
                 language = gr.Dropdown(
                     choices=supported_language_codes,
                     value="en-us",
@@ -243,7 +288,7 @@ def build_interface():
             )
             with gr.Column():
                 speaker_audio = gr.Audio(
-                    label="Optional Speaker Audio (for cloning)",
+                    label="Optional Speaker Audio Sample (for cloning)",
                     type="filepath",
                 )
                 speaker_noised_checkbox = gr.Checkbox(label="Denoise Speaker?", value=False)
@@ -316,36 +361,37 @@ def build_interface():
                 "Certain configurations can cause the model to become unstable. Setting emotion to unconditional may help."
             )
             with gr.Row():
-                emotion1 = gr.Slider(0.0, 1.0, 1.0, 0.05, label="Happiness")
-                emotion2 = gr.Slider(0.0, 1.0, 0.05, 0.05, label="Sadness")
-                emotion3 = gr.Slider(0.0, 1.0, 0.05, 0.05, label="Disgust")
-                emotion4 = gr.Slider(0.0, 1.0, 0.05, 0.05, label="Fear")
+                happiness = gr.Slider(0.0, 1.0, 1.0, 0.05, label="Happiness")
+                sadness = gr.Slider(0.0, 1.0, 0.05, 0.05, label="Sadness")
+                disgust = gr.Slider(0.0, 1.0, 0.05, 0.05, label="Disgust")
+                fear = gr.Slider(0.0, 1.0, 0.05, 0.05, label="Fear")
             with gr.Row():
-                emotion5 = gr.Slider(0.0, 1.0, 0.05, 0.05, label="Surprise")
-                emotion6 = gr.Slider(0.0, 1.0, 0.05, 0.05, label="Anger")
-                emotion7 = gr.Slider(0.0, 1.0, 0.1, 0.05, label="Other")
-                emotion8 = gr.Slider(0.0, 1.0, 0.2, 0.05, label="Neutral")
+                surprise = gr.Slider(0.0, 1.0, 0.05, 0.05, label="Surprise")
+                anger = gr.Slider(0.0, 1.0, 0.05, 0.05, label="Anger")
+                other = gr.Slider(0.0, 1.0, 0.1, 0.05, label="Other")
+                neutral = gr.Slider(0.0, 1.0, 0.2, 0.05, label="Neutral")
 
         with gr.Column():
             generate_button = gr.Button("Generate Audio")
-            output_audio = gr.Audio(label="Generated Audio", type="numpy", autoplay=True)
+            output_audio = gr.Audio(label="Generated Audio", type="numpy", streaming=True, autoplay=True)
 
         model_choice.change(
             fn=update_ui,
             inputs=[model_choice],
             outputs=[
                 text,
+                file,
                 language,
                 speaker_audio,
                 prefix_audio,
-                emotion1,
-                emotion2,
-                emotion3,
-                emotion4,
-                emotion5,
-                emotion6,
-                emotion7,
-                emotion8,
+                happiness,
+                sadness,
+                disgust,
+                fear,
+                surprise,
+                anger,
+                other,
+                neutral,
                 vq_single_slider,
                 fmax_slider,
                 pitch_std_slider,
@@ -362,17 +408,18 @@ def build_interface():
             inputs=[model_choice],
             outputs=[
                 text,
+                file,
                 language,
                 speaker_audio,
                 prefix_audio,
-                emotion1,
-                emotion2,
-                emotion3,
-                emotion4,
-                emotion5,
-                emotion6,
-                emotion7,
-                emotion8,
+                happiness,
+                sadness,
+                disgust,
+                fear,
+                surprise,
+                anger,
+                other,
+                neutral,
                 vq_single_slider,
                 fmax_slider,
                 pitch_std_slider,
@@ -389,17 +436,18 @@ def build_interface():
             inputs=[
                 model_choice,
                 text,
+                file,
                 language,
                 speaker_audio,
                 prefix_audio,
-                emotion1,
-                emotion2,
-                emotion3,
-                emotion4,
-                emotion5,
-                emotion6,
-                emotion7,
-                emotion8,
+                happiness,
+                sadness,
+                disgust,
+                fear,
+                surprise,
+                anger,
+                other,
+                neutral,
                 vq_single_slider,
                 fmax_slider,
                 pitch_std_slider,

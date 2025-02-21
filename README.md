@@ -136,11 +136,6 @@ pip install -e .
 pip install --no-build-isolation -e .[compile] # optional but needed to run the hybrid
 ```
 
-Finally, Install spacy's language model (for text processing) into the activated system/environment
-```bash
-python -m spacy download en_core_web_trf
-```
-
 ##### Confirm that it's working
 
 For convenience we provide a minimal example to check that the installation works:

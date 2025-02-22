@@ -3,7 +3,7 @@ import torch
 import torchaudio
 import gradio as gr
 from os import getenv
-from utils import process_file, float32_to_int16
+from utils import process_file, float32_to_int16, concatenate_audio
 from zonos.model import Zonos, DEFAULT_BACKBONE_CLS as ZonosBackbone
 from zonos.conditioning import make_cond_dict, supported_language_codes
 from zonos.utils import DEFAULT_DEVICE as device
@@ -187,6 +187,7 @@ def generate_audio(
         total_chunks = len(text_chunks)
         gr.Info(f"Text split into {total_chunks} chunks. Starting synthesis...")
 
+        audio_segments = []
         # Chunked Generation (unlimited content, yay!)
         for idx, chunk in enumerate(text_chunks, 1):
             if not chunk.strip():
@@ -237,16 +238,20 @@ def generate_audio(
             if wav_out.dim() == 2 and wav_out.size(0) > 1:
                 wav_out = wav_out[0:1, :]
 
-            if idx != total_chunks:
-                # add sub-sec silence between chunks
-                silence = torch.zeros(1, int(sr_out * 0.3))
-                wav_out = torch.cat([wav_out, silence], dim=1)
-            # gradio audio streaming except 16bit int array
-            wav_array = float32_to_int16(wav_out.squeeze().numpy())
-            yield (sr_out, wav_array), seed
+            audio_segments.append(wav_out)
+            if idx != total_chunks:  # add sub-second silence after every audio chunk except last one
+                audio_segments.append(torch.zeros(1, int(sr_out * 0.2)))  # 0.2 seem to be perfect
+
+        if audio_segments:  # most probably
+            final_audio = torch.cat(audio_segments, dim=1)  # 1, k
+            wav_array = float32_to_int16(final_audio.squeeze().numpy())  # gradio audio except 16bit int array
+            return (sr_out, wav_array), seed
+        else:
+            return (None, None), seed
 
     except Exception as e:
         gr.Error(str(e))
+        return (None, None), seed
 
 
 def build_interface():
@@ -379,7 +384,7 @@ def build_interface():
 
         with gr.Column():
             generate_button = gr.Button("Generate Audio")
-            output_audio = gr.Audio(label="Generated Audio", type="numpy", streaming=True, autoplay=True)
+            output_audio = gr.Audio(label="Generated Audio", type="numpy", autoplay=True)
 
         model_choice.change(
             fn=update_ui,

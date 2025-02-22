@@ -67,8 +67,8 @@ torchaudio.save("sample.wav", wavs[0], model.autoencoder.sampling_rate)
 ### Gradio interface (recommended)
 
 ```bash
-uv run gradio_interface.py
-# python gradio_interface.py
+uv run gradio_interface/main.py
+# python gradio_interface/main.py
 ```
 
 This should produce a `sample.wav` file in your project root directory.
@@ -78,6 +78,8 @@ _For repeated sampling we highly recommend using the gradio interface instead, a
 ## Features
 
 - Zero-shot TTS with voice cloning: Input desired text and a 10-30s speaker sample to generate high quality TTS output
+- Text/File inputs: Support both written text and document (TXT, PDF, XLSX, DOCX and other [Docling](https://ds4sd.github.io/docling/supported_formats/) supported formats)
+- Unlimited content: Support infinite content length due to the chunked generation 
 - Audio prefix inputs: Add text plus an audio prefix for even richer speaker matching. Audio prefixes can be used to elicit behaviours such as whispering which can otherwise be challenging to replicate when cloning from speaker embeddings
 - Multilingual support: Zonos-v0.1 supports English, Japanese, Chinese, French, and German
 - Audio quality and emotion control: Zonos offers fine-grained control of many aspects of the generated audio. These include speaking rate, pitch, maximum frequency, audio quality, and various emotions such as happiness, anger, sadness, and fear.

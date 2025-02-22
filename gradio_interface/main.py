@@ -1,10 +1,9 @@
 import tempfile
-from scipy.stats import yeojohnson
 import torch
 import torchaudio
 import gradio as gr
 from os import getenv
-from utils import process_file
+from utils import process_file, float32_to_int16
 from zonos.model import Zonos, DEFAULT_BACKBONE_CLS as ZonosBackbone
 from zonos.conditioning import make_cond_dict, supported_language_codes
 from zonos.utils import DEFAULT_DEVICE as device
@@ -190,7 +189,7 @@ def generate_audio(
 
         # Chunked Generation (unlimited content, yay!)
         for idx, chunk in enumerate(text_chunks, 1):
-            if chunk.strip():
+            if not chunk.strip():
                 continue
             gr.Info(f"Generating chunk {idx}/{total_chunks}...")
 
@@ -231,13 +230,20 @@ def generate_audio(
 
             wav_out = selected_model.autoencoder.decode(codes).cpu().detach()
             sr_out = selected_model.autoencoder.sampling_rate
+            if wav_out.dim() == 3:
+                wav_out = wav_out.squeeze(0)
+            if wav_out.dim() == 1:
+                wav_out = wav_out.unsqueeze(0)
             if wav_out.dim() == 2 and wav_out.size(0) > 1:
                 wav_out = wav_out[0:1, :]
 
-            # add sub-sec silence between chunks
-            silence = torch.zeros(1, int(selected_model.autoencoder.sampling_rate * 0.4))
-            wav_out = torch.cat([wav_out, silence], dim=1)
-            yield (sr_out, wav_out.squeeze().numpy()), seed
+            if idx != total_chunks:
+                # add sub-sec silence between chunks
+                silence = torch.zeros(1, int(sr_out * 0.3))
+                wav_out = torch.cat([wav_out, silence], dim=1)
+            # gradio audio streaming except 16bit int array
+            wav_array = float32_to_int16(wav_out.squeeze().numpy())
+            yield (sr_out, wav_array), seed
 
     except Exception as e:
         gr.Error(str(e))

@@ -1,6 +1,7 @@
 import os
 import spacy
 from spacy_layout import spaCyLayout
+import numpy as np
 
 
 def process_file(file: str, words_per_chunk_seconds=32):
@@ -43,3 +44,11 @@ def process_file(file: str, words_per_chunk_seconds=32):
 
     chunks.append(" ".join(splits[current_split:]))  # flush the remaining splits
     return chunks
+
+
+def float32_to_int16(audio_array):
+    if np.issubdtype(audio_array.dtype, np.floating):
+        max_val = np.max(np.abs(audio_array))
+        # Scale and convert
+        int16_array = np.clip((audio_array / max_val) * 32767, -32768, 32767).astype(np.int16)
+        return int16_array

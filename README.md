@@ -67,8 +67,8 @@ torchaudio.save("sample.wav", wavs[0], model.autoencoder.sampling_rate)
 ### Gradio interface (recommended)
 
 ```bash
-uv run gradio_interface.py
-# python gradio_interface.py
+uv run gradio_interface/main.py
+# python gradio_interface/main.py
 ```
 
 This should produce a `sample.wav` file in your project root directory.

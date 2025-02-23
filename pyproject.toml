@@ -22,6 +22,7 @@ dependencies = [
     "spacy-layout>=0.0.11",
     "en-core-web-trf",
     "faster-whisper>=1.1.1",
+    "spacy>=3.8.4",
 ]
 
 # These are technically optional, but mamba-ssm is required to run hybrid models.

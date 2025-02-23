@@ -1,4 +1,5 @@
-import tempfile
+import tempfile, gc
+import traceback
 import torch
 import torchaudio
 import gradio as gr
@@ -7,9 +8,11 @@ from utils import process_file, float32_to_int16
 from zonos.model import Zonos, DEFAULT_BACKBONE_CLS as ZonosBackbone
 from zonos.conditioning import make_cond_dict, supported_language_codes
 from zonos.utils import DEFAULT_DEVICE as device
+from faster_whisper import WhisperModel
 
 CURRENT_MODEL_TYPE = None
 CURRENT_MODEL = None
+ASR_MODEL = WhisperModel("small", device=device.type, compute_type="float16")
 
 SPEAKER_EMBEDDING = None
 SPEAKER_AUDIO_PATH = None
@@ -20,6 +23,7 @@ def load_model_if_needed(model_choice: str):
     if CURRENT_MODEL_TYPE != model_choice:
         if CURRENT_MODEL is not None:
             del CURRENT_MODEL
+            gc.collect()
             torch.cuda.empty_cache()
         print(f"Loading {model_choice} model...")
         CURRENT_MODEL = Zonos.from_pretrained(model_choice, device=device)
@@ -164,19 +168,12 @@ def generate_audio(
 
         if speaker_audio is not None and "speaker" not in unconditional_keys:
             if speaker_audio != SPEAKER_AUDIO_PATH:
+                print(speaker_audio, SPEAKER_AUDIO_PATH)
                 print("Recomputed speaker embedding")
                 wav, sr = torchaudio.load(speaker_audio)
                 SPEAKER_EMBEDDING = selected_model.make_speaker_embedding(wav, sr)
                 SPEAKER_EMBEDDING = SPEAKER_EMBEDDING.to(device, dtype=torch.bfloat16)
                 SPEAKER_AUDIO_PATH = speaker_audio
-
-        audio_prefix_codes = None
-        if prefix_audio is not None:
-            wav_prefix, sr_prefix = torchaudio.load(prefix_audio)
-            wav_prefix = wav_prefix.mean(0, keepdim=True)
-            wav_prefix = selected_model.autoencoder.preprocess(wav_prefix, sr_prefix)
-            wav_prefix = wav_prefix.to(device, dtype=torch.float32)
-            audio_prefix_codes = selected_model.autoencoder.encode(wav_prefix.unsqueeze(0))
 
         emotion_tensor = torch.tensor(list(map(float, [e1, e2, e3, e4, e5, e6, e7, e8])), device=device)
 
@@ -201,6 +198,53 @@ def generate_audio(
                 progress((step, estimated_total_steps))
                 return True
 
+            print("Computing Audio Prefix....")
+            if idx == 1 and not audio_segments:  # for the first step, get the audio codes from provided prefix audio
+                audio_prefix_codes = None
+                if prefix_audio is not None:
+                    wav_prefix, sr_prefix = torchaudio.load(prefix_audio)
+                    wav_prefix = wav_prefix.mean(0, keepdim=True)
+                    wav_prefix = selected_model.autoencoder.preprocess(wav_prefix, sr_prefix)
+                    wav_prefix = wav_prefix.to(device, dtype=torch.float32)
+                    audio_prefix_codes = selected_model.autoencoder.encode(wav_prefix.unsqueeze(0))
+            else:
+                # asr word level timestamps
+                torchaudio.save("output.wav", audio_segments[-1], sample_rate=sr_out, format="wav")
+                segments, info = ASR_MODEL.transcribe(
+                    "output.wav",
+                    beam_size=5,
+                    word_timestamps=True,
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=500),
+                )
+                os.remove("output.wav")
+                word_segments = [word for segment in segments for word in segment.words]
+                n_last_words = word_segments[-4:]  # last 4 words
+                print("Doing ASR...")
+                start_time = n_last_words[0].start
+                end_time = n_last_words[-1].end
+                transcript_prefix_text = "".join([each_word.word for each_word in n_last_words])
+                # prefix transcription to the chunk
+                chunk = transcript_prefix_text + chunk
+
+                start_sample = int(start_time * sr_out)
+                # slice out the samples belongs to the text
+                prev_wav_out_sliced = audio_segments[-1][
+                    :, start_sample:
+                ]  # up till last sample, coz the sample from start to end bolongs to the text above
+
+                # skip mean step as we already have a tensor of 1, prev_wav_out_sliced
+                wav_prefix = selected_model.autoencoder.preprocess(prev_wav_out_sliced, sr_out)
+                wav_prefix = wav_prefix.to(device, dtype=torch.float32)
+                audio_prefix_codes = selected_model.autoencoder.encode(wav_prefix.unsqueeze(0))
+
+                # so here basically, we extracted the approx samples belog to the last 4 words,
+                # and we also added the those last 4 words to the chunk
+                # now the current generation got a slice of text and it's  waveform sample ss prefix
+
+            print("Audio prefix codes shape:", audio_prefix_codes.shape)
+            print("Audio prefix codes:", audio_prefix_codes)
+
             cond_dict = make_cond_dict(
                 text=chunk.strip(),
                 language=language,
@@ -216,6 +260,7 @@ def generate_audio(
                 unconditional_keys=unconditional_keys,
             )
             conditioning = selected_model.prepare_conditioning(cond_dict)
+            sr_out = selected_model.autoencoder.sampling_rate
 
             codes = selected_model.generate(
                 prefix_conditioning=conditioning,
@@ -228,9 +273,17 @@ def generate_audio(
                 ),
                 callback=update_progress,
             )
+            print("Codes shape:", codes.shape)
+            print("Codes:", codes)
 
+            # if idx!=1: codes = codes[..., audio_prefix_codes.shape[-1]:] # skip prefix codes
             wav_out = selected_model.autoencoder.decode(codes).cpu().detach()
-            sr_out = selected_model.autoencoder.sampling_rate
+            if idx != 1:
+                wav_out = wav_out[..., prev_wav_out_sliced.shape[-1] :]  # skip prefix codes
+
+            print("Wav_out shape:", wav_out.shape)
+            print("Wav_out:", wav_out)
+
             if wav_out.dim() == 3:
                 wav_out = wav_out.squeeze(0)
             if wav_out.dim() == 1:
@@ -239,8 +292,6 @@ def generate_audio(
                 wav_out = wav_out[0:1, :]
 
             audio_segments.append(wav_out)
-            if idx != total_chunks:  # add sub-second silence after every audio chunk except last one
-                audio_segments.append(torch.zeros(1, int(sr_out * 0.2)))  # 0.2 seem to be perfect
 
         if audio_segments:  # most probably
             final_audio = torch.cat(audio_segments, dim=1)  # 1, k
@@ -250,6 +301,7 @@ def generate_audio(
             return (None, None), seed
 
     except Exception as e:
+        traceback.print_exc()
         gr.Error(str(e))
         return (None, None), seed
 
@@ -293,7 +345,7 @@ def build_interface():
                     info="Select a language code.",
                 )
             prefix_audio = gr.Audio(
-                value="assets/silence_100ms.wav",
+                value="Zonos/assets/silence_100ms.wav",
                 label="Optional Prefix Audio (continue from this audio)",
                 type="filepath",
             )

@@ -19,6 +19,10 @@ dependencies = [
     "soundfile>=0.13.1",
     "huggingface-hub>=0.28.1",
     "gradio>=5.15.0",
+    "spacy-layout>=0.0.11",
+    "en-core-web-trf",
+    "faster-whisper>=1.1.1",
+    "spacy>=3.8.4",
 ]
 
 # These are technically optional, but mamba-ssm is required to run hybrid models.
@@ -34,6 +38,9 @@ include = ["zonos"]
 
 [tool.uv]
 no-build-isolation-package = ["flash-attn", "mamba-ssm", "causal-conv1d"]
+
+[tool.uv.sources]
+en-core-web-trf = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl" }
 
 [tool.ruff]
 line-length = 120

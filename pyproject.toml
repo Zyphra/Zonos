@@ -19,9 +19,10 @@ dependencies = [
     "soundfile>=0.13.1",
     "huggingface-hub>=0.28.1",
     "gradio>=5.15.0",
+    "fastapi>=0.95.0",
+    "uvicorn>=0.18.0"
 ]
 
-# These are technically optional, but mamba-ssm is required to run hybrid models.
 [project.optional-dependencies]
 compile = [
     "flash-attn>=2.7.3",

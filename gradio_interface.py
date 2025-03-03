@@ -147,7 +147,7 @@ def generate_audio(
             print("Recomputed speaker embedding")
             wav, sr = torchaudio.load(speaker_audio)
             SPEAKER_EMBEDDING = selected_model.make_speaker_embedding(wav, sr)
-            SPEAKER_EMBEDDING = SPEAKER_EMBEDDING.to(device, dtype=torch.bfloat16)
+            SPEAKER_EMBEDDING = SPEAKER_EMBEDDING.to(device, dtype=torch.float16)
             SPEAKER_AUDIO_PATH = speaker_audio
 
     audio_prefix_codes = None

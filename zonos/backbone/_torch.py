@@ -61,7 +61,7 @@ class TorchZonosBackbone(nn.Module):
         self.layers = nn.ModuleList(TransformerBlock(config, i) for i in range(config.n_layer))
         self.norm_f = nn.LayerNorm(config.d_model, eps=config.norm_epsilon)
 
-    def allocate_inference_cache(self, batch_size: int, max_seqlen: int, dtype: torch.dtype = torch.bfloat16):
+    def allocate_inference_cache(self, batch_size: int, max_seqlen: int, dtype: torch.dtype = torch.float16):
         # TODO: This function should be pure
         head_dim = self.config.d_model // self.config.attn_cfg["num_heads"]
         self.freqs_cis = precompute_freqs_cis(16384, head_dim)
@@ -93,7 +93,7 @@ class TransformerBlock(nn.Module):
         self.num_heads_kv = config.attn_cfg["num_heads_kv"]
         self.head_dim = config.d_model // config.attn_cfg["num_heads"]
 
-    def allocate_inference_cache(self, batch_size: int, max_seqlen: int, dtype: torch.dtype = torch.bfloat16):
+    def allocate_inference_cache(self, batch_size: int, max_seqlen: int, dtype: torch.dtype = torch.float16):
         return torch.empty(batch_size, max_seqlen, 2, self.num_heads_kv, self.head_dim, dtype=dtype), None
 
     def forward(self, x: torch.Tensor, inference_params: InferenceParams, freqs_cis: torch.Tensor) -> torch.Tensor:

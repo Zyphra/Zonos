@@ -29,10 +29,13 @@ def pad_weight_(w: nn.Embedding | nn.Linear, multiple: int):
 
 def get_device() -> torch.device:
     if torch.cuda.is_available():
-        return torch.device(torch.cuda.current_device())
-    # MPS breaks for whatever reason. Uncomment when it's working.
-    # if torch.mps.is_available():
-    #     return torch.device("mps")
+        device_index = torch.cuda.current_device()
+        major, minor = torch.cuda.get_device_capability(device_index)
+        if major >= 7:
+            return torch.device("cuda")
+        else:
+            print(f"CUDA device detected (Compute Capability {major}.{minor}), but Zonos requires 7.0 or higher. Falling back to CPU.")
+
     return torch.device("cpu")
 
 

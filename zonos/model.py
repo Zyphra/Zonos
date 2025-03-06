@@ -198,7 +198,7 @@ class Zonos(nn.Module):
     def setup_cache(self, batch_size: int, max_seqlen: int, dtype: torch.dtype = torch.bfloat16) -> InferenceParams:
         max_seqlen = find_multiple(max_seqlen, 8)
         key_value_memory_dict = self.backbone.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype)
-        lengths_per_sample = torch.full((batch_size,), 0, dtype=torch.int32)
+        lengths_per_sample = torch.full((batch_size,), 0, dtype=torch.int32, device=self.device)
         return InferenceParams(max_seqlen, batch_size, 0, 0, key_value_memory_dict, lengths_per_sample)
 
     def prepare_conditioning(self, cond_dict: dict, uncond_dict: dict | None = None) -> torch.Tensor:
@@ -210,6 +210,27 @@ class Zonos(nn.Module):
                 self.prefix_conditioner(uncond_dict),
             ]
         )
+
+    def forward(self, prefix_conditioning: torch.Tensor) -> torch.Tensor:
+        """Forward pass of the model.
+        
+        Args:
+            prefix_conditioning: Tensor of shape [batch_size, seq_len, d_model] containing the conditioning information
+            
+        Returns:
+            Tensor of logits for next token prediction
+        """
+        # Setup inference parameters for the current batch
+        batch_size = prefix_conditioning.shape[0] // 2  # Divide by 2 because of CFG
+        inference_params = self.setup_cache(batch_size=batch_size * 2, max_seqlen=prefix_conditioning.shape[1])
+        
+        # Pass through backbone
+        hidden_states = self.backbone(prefix_conditioning, inference_params)
+        
+        # Get logits from the final hidden states
+        logits = self.apply_heads(hidden_states)
+        
+        return logits
 
     def can_use_cudagraphs(self) -> bool:
         # Only the mamba-ssm backbone supports CUDA Graphs at the moment

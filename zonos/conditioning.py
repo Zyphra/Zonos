@@ -235,6 +235,17 @@ class EspeakPhonemeConditioner(Conditioner):
 
         return phoneme_embeds
 
+class ChunkedEspeakConditioner(EspeakPhonemeConditioner):
+    def apply_cond(self, texts: list[str], languages: list[str], chunk_size: int = 1000, overlap: int = 200) -> torch.Tensor:
+        # Split text into chunks with overlap
+        chunked_texts = self._chunk_texts(texts, chunk_size, overlap)
+        # Process each chunk
+        chunk_embeddings = []
+        for chunk in chunked_texts:
+            emb = super().apply_cond(chunk, languages)
+            chunk_embeddings.append(emb)
+        # Interpolate overlapping regions
+        return self._interpolate_embeddings(chunk_embeddings, overlap)
 
 # ------- ESPEAK CONTAINMENT ZONE ------------------------------------------------------------------------------------------------------------------------------------------------
 

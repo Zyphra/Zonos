@@ -2,6 +2,10 @@ import torch
 import torchaudio
 import gradio as gr
 from os import getenv
+from typing import Tuple
+import numpy as np
+import nltk
+import math
 
 from zonos.model import Zonos, DEFAULT_BACKBONE_CLS as ZonosBackbone
 from zonos.conditioning import make_cond_dict, supported_language_codes
@@ -82,20 +86,123 @@ def update_ui(model_choice):
     )
 
 
+def generate_with_latent_windows(
+    model: Zonos,
+    text: str,
+    cond_dict: dict,
+    overlap_seconds: float = 0.1,
+    cfg_scale: float = 2.0,
+    min_p: float = 0.15,
+    seed: int = 420,
+) -> Tuple[int, np.ndarray]:
+    """Generate audio using sliding windows in latent space"""
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
+    
+    # Set global seed
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    
+    # Split into sentences
+    sentences = nltk.sent_tokenize(text)
+    if len(sentences) == 1:
+        # Single sentence - generate normally
+        torch.manual_seed(seed)
+        conditioning = model.prepare_conditioning(cond_dict)
+        codes = model.generate(
+            prefix_conditioning=conditioning,
+            max_new_tokens=86 * 120,  # 120 seconds max
+            cfg_scale=cfg_scale,
+            batch_size=1,
+            sampling_params=dict(min_p=min_p)
+        )
+        wav_out = model.autoencoder.decode(codes).cpu().detach()
+        return model.autoencoder.sampling_rate, wav_out.squeeze().numpy()
+
+    # Calculate window sizes in latent tokens
+    tokens_per_second = 86
+    overlap_size = int(overlap_seconds * tokens_per_second)
+    
+    all_codes = []
+    
+    for i, sentence in enumerate(sentences):
+        # Create conditioning for this sentence
+        sent_dict = cond_dict.copy()
+        sent_dict['espeak'] = ([sentence], [cond_dict['espeak'][1][0]])
+        
+        # Generate this sentence
+        torch.manual_seed(seed)
+        conditioning = model.prepare_conditioning(sent_dict)
+        codes = model.generate(
+            prefix_conditioning=conditioning,
+            max_new_tokens=int(len(sentence) * 1.5 * tokens_per_second / 10),
+            cfg_scale=cfg_scale,
+            batch_size=1,
+            sampling_params=dict(min_p=min_p)
+        )
+        
+        if i == 0:
+            all_codes.append(codes)
+            continue
+            
+        # Find best overlap position based on content similarity
+        overlap_a = all_codes[-1][..., -overlap_size:]
+        overlap_b = codes[..., :overlap_size]
+        
+        # Calculate similarity scores across the overlap region
+        similarity = torch.cosine_similarity(
+            overlap_a.float(), 
+            overlap_b.float(),
+            dim=1
+        ).mean(dim=0)
+        
+        # Find the position with highest similarity for crossfade
+        best_pos = torch.argmax(similarity)
+        effective_overlap = overlap_size - best_pos
+        
+        # Apply cosine fade for smooth transition
+        fade = torch.cos(torch.linspace(math.pi, 0, effective_overlap, device=codes.device))
+        fade = 0.5 * (1 + fade)
+        fade = fade.view(1, 1, -1)
+        
+        # Crossfade at the best position
+        overlap_region = (
+            overlap_a[..., -effective_overlap:] * (1 - fade) + 
+            overlap_b[..., -effective_overlap:] * fade
+        )
+        
+        # Replace overlap region in previous sentence
+        all_codes[-1] = torch.cat([
+            all_codes[-1][..., :-effective_overlap],
+            overlap_region
+        ], dim=-1)
+        
+        # Add new sentence (excluding overlap)
+        all_codes.append(codes[..., effective_overlap:])
+        
+        # Check total length
+        total_length = sum(c.shape[-1] for c in all_codes)
+        if total_length >= tokens_per_second * 120:  # 120 seconds max
+            break
+    
+    # Concatenate all sentences
+    final_codes = torch.cat(all_codes, dim=-1)
+    final_codes = final_codes.to(torch.long)
+    
+    # Decode to audio
+    wav_out = model.autoencoder.decode(final_codes).cpu().detach()
+    return model.autoencoder.sampling_rate, wav_out.squeeze().numpy()
+
+
 def generate_audio(
     model_choice,
     text,
     language,
     speaker_audio,
     prefix_audio,
-    e1,
-    e2,
-    e3,
-    e4,
-    e5,
-    e6,
-    e7,
-    e8,
+    e1, e2, e3, e4, e5, e6, e7, e8,
     vq_single,
     fmax,
     pitch_std,
@@ -112,6 +219,7 @@ def generate_audio(
     seed,
     randomize_seed,
     unconditional_keys,
+    use_windowing,
     progress=gr.Progress(),
 ):
     """
@@ -133,7 +241,7 @@ def generate_audio(
     confidence = float(confidence)
     quadratic = float(quadratic)
     seed = int(seed)
-    max_new_tokens = 86 * 30
+    max_new_tokens = 86 * 60
 
     # This is a bit ew, but works for now.
     global SPEAKER_AUDIO_PATH, SPEAKER_EMBEDDING
@@ -186,22 +294,32 @@ def generate_audio(
         progress((step, estimated_total_steps))
         return True
 
-    codes = selected_model.generate(
-        prefix_conditioning=conditioning,
-        audio_prefix_codes=audio_prefix_codes,
-        max_new_tokens=max_new_tokens,
-        cfg_scale=cfg_scale,
-        batch_size=1,
-        sampling_params=dict(top_p=top_p, top_k=top_k, min_p=min_p, linear=linear, conf=confidence, quad=quadratic),
-        callback=update_progress,
-    )
+    if use_windowing:
+        return generate_with_latent_windows(
+            selected_model,
+            text,
+            cond_dict,
+            overlap_seconds=0.1,
+            cfg_scale=cfg_scale,
+            min_p=min_p,
+            seed=seed
+        ), seed
+    else:
+        codes = selected_model.generate(
+            prefix_conditioning=conditioning,
+            audio_prefix_codes=audio_prefix_codes,
+            max_new_tokens=max_new_tokens,
+            cfg_scale=cfg_scale,
+            batch_size=1,
+            sampling_params=dict(top_p=top_p, top_k=top_k, min_p=min_p, linear=linear, conf=confidence, quad=quadratic),
+            callback=update_progress,
+        )
 
-    wav_out = selected_model.autoencoder.decode(codes).cpu().detach()
-    sr_out = selected_model.autoencoder.sampling_rate
-    if wav_out.dim() == 2 and wav_out.size(0) > 1:
-        wav_out = wav_out[0:1, :]
-    return (sr_out, wav_out.squeeze().numpy()), seed
-
+        wav_out = selected_model.autoencoder.decode(codes).cpu().detach()
+        sr_out = selected_model.autoencoder.sampling_rate
+        if wav_out.dim() == 2 and wav_out.size(0) > 1:
+            wav_out = wav_out[0:1, :]
+        return (sr_out, wav_out.squeeze().numpy()), seed
 
 def build_interface():
     supported_models = []
@@ -299,6 +417,14 @@ def build_interface():
                     value=["emotion"],
                     label="Unconditional Keys",
                 )
+
+            gr.Markdown(
+                "### Latent Windowing\n"
+                "This feature processes longer texts by breaking them into sentences and generating them separately with smooth transitions in latent space. "
+                "It works best when used with voice cloning (speaker audio) using Transformers (not hybrid) and may produce inconsistent results otherwise. "
+                "Enable this if you're doing voice cloning with longer texts."
+            )
+            use_windowing = gr.Checkbox(label="Enable Latent Windowing", value=False)
 
             gr.Markdown(
                 "### Emotion Sliders\n"
@@ -406,6 +532,7 @@ def build_interface():
                 seed_number,
                 randomize_seed_toggle,
                 unconditional_keys,
+                use_windowing,
             ],
             outputs=[output_audio, seed_number],
         )

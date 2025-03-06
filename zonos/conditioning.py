@@ -206,13 +206,18 @@ def get_backend(language: str) -> "EspeakBackend":
 
 def phonemize(texts: list[str], languages: list[str]) -> list[str]:
     texts = clean(texts, languages)
-
     batch_phonemes = []
     for text, language in zip(texts, languages):
-        backend = get_backend(language)
-        phonemes = backend.phonemize([text], strip=True)
-        batch_phonemes.append(phonemes[0])
-
+        segments = re.split(r'(:phonemize/.*?/)', text)
+        phon_parts = []
+        for seg in segments:
+            if seg.startswith(':phonemize/') and seg.endswith('/'):
+                phon_parts.append(seg[len(':phonemize/'):-1].replace(" ", ""))
+            elif seg:
+                backend = get_backend(language)
+                ph = backend.phonemize([seg], strip=True)
+                phon_parts.append(ph[0])
+        batch_phonemes.append("".join(phon_parts))
     return batch_phonemes
 
 

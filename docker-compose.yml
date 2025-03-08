@@ -6,7 +6,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: zonos_container
-    runtime: nvidia
+    gpus: all
     network_mode: "host"
     stdin_open: true
     tty: true

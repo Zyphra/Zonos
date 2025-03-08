@@ -127,15 +127,36 @@ def sample_from_logits(
     repetition_penalty: float = 3.0,
     repetition_penalty_window: int = 2,
 ) -> torch.Tensor:
-    """Sample next token from logits using temperature, top-p, top-k, or min-p sampling.
-
+    """Sample next token from logits using either top_k/p/min_p OR using NovelAI's Unified Sampler.
+    
     Args:
         logits (torch.Tensor): Input logits with token candidates on the last dimension.
-        temperature (float): Sampling temperature. Lower temperature results in more deterministic samples.
-        top_p (float): The p in “top-p”.
-        top_k (int): The k in “top-k”.
+
+        temperature (float): Randomness of the sampling. Lower temperature results in more deterministic samples.
+            To disable sampling entirely, set it to 0. For NovelAI's Unified Sampler, set it to 1.0
+
+        top_p (float): Only sample from the most probable tokens whose cumulative probability is less than p.
+            This is called nucleus sampling. Must be between 0 and 1. Typical values are in the 0.1-0.9 range.
+
+            Set to 0 to disable.
+
+        top_k (int): Only sample from the top k most probable tokens. Set to 0 to disable.
+        
         min_p (float): Minimum token probability, scaled by the probability of the most likely token.
                        Must be between 0 and 1. Typical values are in the 0.01-0.2 range.
+                       If too high, no token might be sampled leading to silence (?)
+
+        linear (float): NovelAI's Unified Sampler -> 0.0 to 1.0, default from gradio 0.5
+
+            Set Linear between 0 and 1 according to how unusual you want tokens to be. 
+            Lower numbers will produce more unusual/creative outputs, 
+            but you will have to reroll or edit more. 
+
+        conf (float): Confidence - Low values make random outputs more random. -> -2.0 * Quad to 2.0, default from gradio 0.4
+
+            As a starting point, set Quad = 1/3 - Linear * 4 / 15, and Conf = -Quad / 2.
+
+        quad (float): Quadratic - High values make low probablities much lower. -> -2.0 to 2.0, default from gradio 0.0
 
     Returns:
         torch.Tensor: Sampled tokens.

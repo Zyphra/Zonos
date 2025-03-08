@@ -331,13 +331,39 @@ def make_cond_dict(
     text: str = "It would be nice to have time for testing, indeed.",
     language: str = "en-us",
     speaker: torch.Tensor | None = None,
+    
+    # Emotion vector from 0.0 to 1.0
+    #   Is entangled with pitch_std because more emotion => more pitch variation
+    #                     VQScore and DNSMOS because they favor neutral speech
+    #
+    #                       Happiness, Sadness, Disgust, Fear, Surprise, Anger, Other, Neutral
     emotion: list[float] = [0.3077, 0.0256, 0.0256, 0.0256, 0.0256, 0.0256, 0.2564, 0.3077],
+
+    # Maximum frequency (0 to 24000), should be 22050 or 24000 for 44.1 or 48 kHz audio
+    # For voice cloning use 22050
     fmax: float = 22050.0,
+    
+    # Standard deviation for pitch (0 to 400), should be 
+    #   20-45 for normal speech, 
+    #   60-150 for expressive speech, 
+    #   higher values => crazier samples
     pitch_std: float = 20.0,
+
+    # Speaking rate in phonemes per minute (0 to 40). 30 is very fast, 10 is slow.
     speaking_rate: float = 15.0,
+
+    # Target VoiceQualityScore for the generated speech (0.5 to 0.8).
+    #   A list of values must be provided which represent each 1/8th of the audio.
+    #   You should unset for expressive speech.
+    # According to discord Chat this is only used for the hybrid model
     vqscore_8: list[float] = [0.78] * 8,
+
+    # CTC target loss
+    # Only used for the hybrid model
     ctc_loss: float = 0.0,
+    # Only used for the hybrid model
     dnsmos_ovrl: float = 4.0,
+    # Only used for the hybrid model
     speaker_noised: bool = False,
     unconditional_keys: Iterable[str] = {"vqscore_8", "dnsmos_ovrl"},
     device: torch.device | str = DEFAULT_DEVICE,
